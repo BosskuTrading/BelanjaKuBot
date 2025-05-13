@@ -6,7 +6,7 @@ import logging
 import pytesseract
 from PIL import Image
 from telegram import Update, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
@@ -113,7 +113,7 @@ app = Flask(__name__)
 def webhook():
     json_str = request.get_data(as_text=True)
     update = Update.de_json(json.loads(json_str), bot)
-    dispatcher.process_update(update)
+    application.process_update(update)  # Change this line to use 'application'
     return 'OK', 200
 
 # Handle image message
@@ -154,19 +154,19 @@ async def handle_image(update: Update, context: CallbackContext):
 
 # Main function to set up Telegram bot with webhook
 def main():
-    global bot, dispatcher
+    global bot, application
 
     bot = Bot(token=BOT1_TOKEN)
-    dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+    application = Application.builder().token(BOT1_TOKEN).build()  # Corrected line
 
     # Set the webhook URL (replace with your Render URL)
     webhook_url = 'https://laporbelanjabot.onrender.com/webhook'
     bot.set_webhook(url=webhook_url)
     logger.info(f"Webhook set to: {webhook_url}")
 
-    # Add handlers to dispatcher
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    # Add handlers to application
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_image))
 
     # Run Flask in a separate thread to handle web requests
     thread = threading.Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 5000})
