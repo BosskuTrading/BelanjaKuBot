@@ -1,0 +1,9 @@
+python-telegram-bot==20.3
+google-auth==2.27.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.1.1
+google-api-python-client==2.115.0
+Pillow==10.2.0
+pytesseract==0.3.10
+Flask==2.2.5
+apscheduler==3.10.4
