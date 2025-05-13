@@ -5,11 +5,13 @@ import base64
 import logging
 import pytesseract
 from PIL import Image
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, Bot
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters, CallbackContext
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
+from flask import Flask, request
+import threading
 
 # Logging
 logging.basicConfig(
@@ -44,7 +46,7 @@ def get_user_range(user_id):
     return f"{user_id}!A:F"
 
 # /start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("👋 Hai! Hantar gambar resit anda dan saya akan simpan dalam Google Sheets.")
 
 # Extract text from image
@@ -91,25 +93,53 @@ def save_to_sheet(user_id, data):
         data["items"],
         data["total_amount"]
     ]
-    sheet.values().append(
-        spreadsheetId=SHEET_ID,
-        range=range_name,
-        valueInputOption="USER_ENTERED",
-        body={"values": [row]}
-    ).execute()
+    try:
+        sheet.values().append(
+            spreadsheetId=SHEET_ID,
+            range=range_name,
+            valueInputOption="USER_ENTERED",
+            body={"values": [row]}
+        ).execute()
+        logger.info(f"Data for user {user_id} saved successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to save data to Google Sheets: {e}")
+        raise
+
+# Set up Flask app for webhook
+app = Flask(__name__)
+
+# Webhook endpoint for Telegram
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    json_str = request.get_data(as_text=True)
+    update = Update.de_json(json.loads(json_str), bot)
+    dispatcher.process_update(update)
+    return 'OK', 200
 
 # Handle image message
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_image(update: Update, context: CallbackContext):
     user = update.message.from_user
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_path = f"{user.id}_resit.jpg"
+    
+    # Download the image
     await file.download_to_drive(image_path)
+    logger.info(f"Image downloaded: {image_path}")
 
     await update.message.reply_text("📸 Gambar diterima. Sedang memproses...")
 
     try:
+        # Check image size and reduce if necessary
+        image = Image.open(image_path)
+        image.thumbnail((1024, 1024))  # Reduce size to avoid high memory usage
+        image.save(image_path)
+
+        # Extract text from the image
         text = extract_text(image_path)
+        logger.info(f"Text extracted: {text}")
+
+        # Parse extracted text and save to Google Sheets
         data = parse_receipt(text)
         save_to_sheet(user.id, data)
         await update.message.reply_text("✅ Maklumat berjaya disimpan ke Google Sheets.")
@@ -117,15 +147,30 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Gagal proses resit: {e}")
         await update.message.reply_text("❌ Maaf, resit tidak dapat diproses.")
     finally:
+        # Clean up the image file after processing
         if os.path.exists(image_path):
             os.remove(image_path)
+            logger.info(f"Image file {image_path} deleted.")
 
-# Main function
+# Main function to set up Telegram bot with webhook
 def main():
-    app = Application.builder().token(BOT1_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-    app.run_polling()
+    global bot, dispatcher
+
+    bot = Bot(token=BOT1_TOKEN)
+    dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+
+    # Set the webhook URL (replace with your Render URL)
+    webhook_url = 'https://laporbelanjabot.onrender.com/webhook'
+    bot.set_webhook(url=webhook_url)
+    logger.info(f"Webhook set to: {webhook_url}")
+
+    # Add handlers to dispatcher
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(filters.PHOTO, handle_image))
+
+    # Run Flask in a separate thread to handle web requests
+    thread = threading.Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 5000})
+    thread.start()
 
 if __name__ == "__main__":
     main()
