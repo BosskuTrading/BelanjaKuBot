@@ -1,96 +1,121 @@
 import os
-import logging
-from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
 import base64
 import json
-import asyncio
+import logging
+from datetime import datetime, timedelta
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
-# --- Config ---
-BOT2_TOKEN = os.getenv("BOT2_TOKEN")
-SHEET_ID = os.getenv("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+# --- CONFIG ---
+BOT_TOKEN = os.getenv('BOT2_TOKEN')
+GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
+SHEET_ID = '1h2br8RSuvuNVydz-4sKXalziottO4QHwtSVP8v1RECQ'
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
-# --- Setup logging ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Logging ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- Setup Google Sheets ---
-credentials_json = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
-credentials = Credentials.from_service_account_info(credentials_json)
-gc = gspread.authorize(credentials)
-sheet = gc.open_by_key(SHEET_ID).sheet1
+# --- Google Sheets Setup ---
+credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
+credentials = service_account.Credentials.from_service_account_info(json.loads(credentials_json), scopes=SCOPES)
+service = build('sheets', 'v4', credentials=credentials)
+sheet = service.spreadsheets()
 
-# --- Setup Telegram Bot & Flask app ---
+# --- Flask App ---
 app = Flask(__name__)
-bot = Bot(BOT2_TOKEN)
-application = ApplicationBuilder().token(BOT2_TOKEN).build()
-
-# --- Helper function to parse and sum data from sheet ---
-def get_user_expenses(user_id: int, days_back: int):
-    """Ambil jumlah perbelanjaan user_id dalam tempoh days_back hari."""
-    records = sheet.get_all_records()
-    total = 0.0
-    cutoff = datetime.now() - timedelta(days=days_back)
-
-    for row in records:
-        try:
-            row_user_id = int(row['user_id'])
-            dt = datetime.strptime(row['datetime'], "%Y-%m-%d %H:%M:%S")
-            amount = float(row['amount']) if 'amount' in row else 0
-            if row_user_id == user_id and dt >= cutoff:
-                total += amount
-        except Exception:
-            pass
-    return total
-
-# --- Bot commands ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "Selamat datang ke LaporanBelanjaBot!\n\n"
-        "Gunakan command:\n"
-        "/mingguan - untuk laporan belanja seminggu\n"
-        "/bulanan - untuk laporan belanja sebulan\n"
+    welcome_text = "Salam! Saya LaporanBelanjaBot.\n\n"\
+                   "Gunakan /laporan_mingguan untuk dapatkan laporan belanja minggu ini.\n"\
+                   "Gunakan /laporan_bulanan untuk dapatkan laporan belanja bulan ini."
+    await update.message.reply_text(welcome_text)
+
+def fetch_expenses():
+    """Fetch all expense data from Google Sheets"""
+    result = sheet.values().get(spreadsheetId=SHEET_ID, range='Sheet1!A2:G').execute()
+    rows = result.get('values', [])
+    return rows
+
+def filter_by_date(rows, start_date, end_date):
+    """Filter rows by date range"""
+    filtered = []
+    for row in rows:
+        try:
+            date_str = row[0]
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            if start_date <= dt <= end_date:
+                filtered.append(row)
+        except Exception:
+            continue
+    return filtered
+
+def summarize_expenses(rows):
+    """Summarize total expenses"""
+    total = 0.0
+    for r in rows:
+        try:
+            amount = float(r[5])
+            total += amount
+        except Exception:
+            pass
+    return total, len(rows)
+
+async def laporan_mingguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now()
+    start_week = today - timedelta(days=today.weekday())  # Monday this week
+    end_week = start_week + timedelta(days=6)
+    
+    rows = fetch_expenses()
+    filtered = filter_by_date(rows, start_week, end_week)
+    total, count = summarize_expenses(filtered)
+    
+    reply = (
+        f"Laporan Mingguan ({start_week.strftime('%Y-%m-%d')} hingga {end_week.strftime('%Y-%m-%d')}):\n"
+        f"Jumlah transaksi: {count}\n"
+        f"Jumlah perbelanjaan: RM {total:.2f}"
     )
-    await update.message.reply_text(msg)
+    await update.message.reply_text(reply)
 
-async def mingguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    total = get_user_expenses(user_id, 7)
-    await update.message.reply_text(f"Jumlah belanja anda dalam 7 hari terakhir: RM{total:.2f}")
-
-async def bulanan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    total = get_user_expenses(user_id, 30)
-    await update.message.reply_text(f"Jumlah belanja anda dalam 30 hari terakhir: RM{total:.2f}")
-
-# Flask route untuk webhook
-@app.route(f"/{BOT2_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.create_task(application.update_queue.put(update))
-    return "OK"
-
-# Route root untuk cek server hidup
-@app.route("/")
-def index():
-    return "LaporanBelanjaBot is running"
-
-# Add handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("mingguan", mingguan))
-application.add_handler(CommandHandler("bulanan", bulanan))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10001"))
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=BOT2_TOKEN,
-        webhook_url=f"https://YOUR_DOMAIN_OR_RENDER_URL/{BOT2_TOKEN}"
+async def laporan_bulanan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now()
+    start_month = today.replace(day=1)
+    # Get last day of month
+    if today.month == 12:
+        end_month = today.replace(day=31)
+    else:
+        end_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+    
+    rows = fetch_expenses()
+    filtered = filter_by_date(rows, start_month, end_month)
+    total, count = summarize_expenses(filtered)
+    
+    reply = (
+        f"Laporan Bulanan ({start_month.strftime('%Y-%m-%d')} hingga {end_month.strftime('%Y-%m-%d')}):\n"
+        f"Jumlah transaksi: {count}\n"
+        f"Jumlah perbelanjaan: RM {total:.2f}"
     )
+    await update.message.reply_text(reply)
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook_handler():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put(update)
+    return 'OK'
+
+async def set_webhook():
+    webhook_url = f"https://laporanbelanjabot.onrender.com/{BOT_TOKEN}"
+    await application.bot.set_webhook(webhook_url)
+
+if __name__ == '__main__':
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('laporan_mingguan', laporan_mingguan))
+    application.add_handler(CommandHandler('laporan_bulanan', laporan_bulanan))
+    
+    import asyncio
+    asyncio.run(set_webhook())
+
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
