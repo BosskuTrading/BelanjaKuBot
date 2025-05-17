@@ -117,11 +117,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Query Google Sheets untuk kira berapa rekod ada utk chat_id ini
         range_ = "Sheet1!A:A"
-        result = (
-            sheet.values()
-            .get(spreadsheetId=SPREADSHEET_ID, range=range_)
-            .execute()
-        )
+        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_).execute()
         values = result.get("values", [])
         count = sum(1 for row in values if row and row[0] == str(chat_id))
         await update.message.reply_text(
@@ -188,8 +184,8 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         update = Update.de_json(data, bot)
-        await application.update_queue.put(update)
-        await application.process_update()
+        # Betulkan: perlu hantar argumen update ke process_update()
+        await application.process_update(update)
     except Exception as e:
         logger.error(f"Error processing update: {e}")
         raise HTTPException(status_code=400, detail="Failed to process update")
