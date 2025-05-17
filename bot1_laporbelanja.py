@@ -1,115 +1,103 @@
 import os
-import base64
-import json
 import logging
-import re
-from fastapi import FastAPI, Request, HTTPException
-from telegram import Update
+from datetime import datetime
+from flask import Flask, request
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
-    Application,
-    ContextTypes,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    ContextTypes,
     filters,
 )
-from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from google.cloud import vision_v1
-from datetime import datetime
+from google.oauth2.service_account import Credentials
 
-logging.basicConfig(level=logging.INFO)
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-BOT1_TOKEN = os.getenv("BOT1_TOKEN")
+# ====== Google Sheets Setup ======
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 
-if not all([BOT1_TOKEN, SPREADSHEET_ID, GOOGLE_CREDENTIALS_BASE64]):
-    raise Exception("Missing environment variables: BOT1_TOKEN, SPREADSHEET_ID, or GOOGLE_CREDENTIALS_BASE64")
+# Decode base64 credentials and create service
+import base64
+import json
 
-credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-credentials_info = json.loads(credentials_json)
-credentials = service_account.Credentials.from_service_account_info(
-    credentials_info,
-    scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/cloud-platform",
-    ],
-)
+credentials_dict = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
+credentials = Credentials.from_service_account_info(credentials_dict)
+sheet_service = build('sheets', 'v4', credentials=credentials)
+sheet = sheet_service.spreadsheets()
 
-sheets_service = build("sheets", "v4", credentials=credentials)
-sheet = sheets_service.spreadsheets()
-vision_client = vision_v1.ImageAnnotatorClient(credentials=credentials)
-
-app = FastAPI()
-
-application = Application.builder().token(BOT1_TOKEN).build()
-
-def append_to_sheet(row_values):
+def append_to_sheet(row):
     try:
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!A1",
+            range="Sheet1!A:F",
             valueInputOption="USER_ENTERED",
-            body={"values": [row_values]},
+            body={"values": [row]},
         ).execute()
-        logger.info(f"Appended to sheet: {row_values}")
-    except HttpError as e:
-        logger.error(f"Google Sheets API error: {e}")
+        logger.info(f"Appended row: {row}")
+    except Exception as e:
+        logger.error(f"Error appending to sheet: {e}")
+
+# ====== OCR / Parsing Dummy Functions ======
+def perform_ocr(image_bytes):
+    # Placeholder dummy OCR text - replace with actual OCR call like Google Vision API
+    return "12/05/2025 MyKedai RM23.50"
 
 def parse_date(text):
-    # Contoh ekstrak tarikh dari teks, boleh diubah ikut format resit anda
-    # Cari tarikh dalam bentuk dd/mm/yyyy atau yyyy-mm-dd
-    patterns = [
-        r"(\d{2}/\d{2}/\d{4})",
-        r"(\d{4}-\d{2}-\d{2})"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return None
+    # Extract date from OCR text - simplified
+    import re
+    m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text)
+    return m.group(1) if m else None
 
 def parse_amount(text):
-    # Cari jumlah dalam bentuk RM, Rp, atau nombor desimal
-    pattern = r"(?:RM|Rp)?\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)"
-    matches = re.findall(pattern, text.replace(',', ''))
-    if matches:
-        # Return nilai terbesar - biasanya jumlah akhir
-        amounts = [float(m) for m in matches]
-        return max(amounts)
+    import re
+    m = re.search(r"RM?(\d+[\.,]?\d*)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).replace(",", ".")
     return None
 
-def perform_ocr(image_bytes):
-    image = vision_v1.Image(content=image_bytes)
-    response = vision_client.text_detection(image=image)
-    texts = response.text_annotations
-    if texts:
-        return texts[0].description
-    return ""
+# ====== Telegram Bot Setup ======
 
-# Handlers
+BOT_TOKEN = os.getenv("BOT1_TOKEN")
+app = Flask(__name__)
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+CHOICES = [["Taip Belanja", "Hantar Resit"]]
+
+# --- Command Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_first_name = update.effective_user.first_name or "there"
+    user_first_name = update.effective_user.first_name or "Sahabat"
     welcome_msg = (
         f"Hai {user_first_name}! 👋\n\n"
-        "Saya bot pelacak belanja anda.\n"
-        "Hantarkan gambar resit pembelian untuk saya ekstrak maklumat belanja.\n"
-        "Taip /help untuk panduan penggunaan.\n"
-        "Taip /status untuk semak berapa resit anda telah hantar."
+        "Saya adalah pembantu belanja anda.\n"
+        "Boleh pilih cara nak rekod belanja anda hari ini:\n"
+        "👉 Taip belanja secara manual\n"
+        "👉 Hantar gambar resit pembelian\n\n"
+        "Sila pilih salah satu pilihan di bawah."
     )
-    await update.message.reply_text(welcome_msg)
+    reply_markup = ReplyKeyboardMarkup(CHOICES, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_msg = (
         "Cara guna bot ini:\n"
-        "1. Hantar gambar resit pembelian.\n"
-        "2. Saya akan cuba ekstrak maklumat dan simpan ke Google Sheets.\n"
-        "3. Anda boleh semak laporan bulanan melalui bot laporan nanti.\n\n"
-        "Jika ada masalah, hubungi admin."
+        "1. Pilih 'Taip Belanja' untuk masukkan maklumat belanja secara manual.\n"
+        "2. Pilih 'Hantar Resit' untuk hantar gambar resit pembelian.\n"
+        "3. Saya akan rekod maklumat anda ke Google Sheets.\n"
+        "4. Gunakan /status untuk semak berapa banyak resit yang anda dah hantar.\n"
+        "5. Gunakan /ping untuk semak sama ada bot ini sedang aktif.\n\n"
+        "Kalau ada sebarang masalah, sila hubungi admin ya."
     )
-    await update.message.reply_text(help_msg)
+    await update.message.reply_text(help_msg, reply_markup=ReplyKeyboardRemove())
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot sedang online dan sedia membantu anda! ✅")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -119,7 +107,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = result.get("values", [])
         count = sum(1 for row in values if row and row[0] == str(chat_id))
         await update.message.reply_text(
-            f"Anda telah menghantar {count} resit kepada saya. Terima kasih! 👍"
+            f"Anda telah menghantar {count} resit atau belanja ke bot ini. Terima kasih! 👍"
         )
     except Exception as e:
         logger.error(f"Error getting status: {e}")
@@ -127,7 +115,84 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Maaf, saya tidak dapat semak status anda sekarang."
         )
 
+# --- Message Handlers ---
+async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower()
+    if "taip belanja" in text:
+        await update.message.reply_text(
+            "Sila taip maklumat belanja anda dalam format mudah seperti:\n\n"
+            "Tarikh(dd/mm/yyyy) NamaKedai Jumlah\n\n"
+            "Contoh:\n12/05/2025 MyKedai 23.50",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data["expecting_manual_input"] = True
+    elif "hantar resit" in text:
+        await update.message.reply_text(
+            "Baik! Sila hantar gambar resit pembelian anda sekarang.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data["expecting_manual_input"] = False
+    else:
+        await update.message.reply_text(
+            "Maaf, saya tidak faham pilihan anda. Sila pilih 'Taip Belanja' atau 'Hantar Resit'.",
+            reply_markup=ReplyKeyboardMarkup(CHOICES, one_time_keyboard=True, resize_keyboard=True)
+        )
+
+async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("expecting_manual_input"):
+        text = update.message.text.strip()
+        parts = text.split()
+        if len(parts) < 3:
+            await update.message.reply_text(
+                "Format tidak betul. Sila taip semula dengan format:\n"
+                "Tarikh(dd/mm/yyyy) NamaKedai Jumlah\nContoh: 12/05/2025 MyKedai 23.50"
+            )
+            return
+
+        tarikh, jumlah = parts[0], parts[-1]
+        nama_kedai = " ".join(parts[1:-1])
+
+        try:
+            datetime.strptime(tarikh, "%d/%m/%Y")
+        except ValueError:
+            await update.message.reply_text(
+                "Tarikh tidak sah. Sila guna format dd/mm/yyyy, contoh: 12/05/2025"
+            )
+            return
+
+        try:
+            jumlah_val = float(jumlah)
+        except ValueError:
+            await update.message.reply_text(
+                "Jumlah tidak sah. Sila taip nombor seperti 23.50"
+            )
+            return
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = [str(update.effective_chat.id), now_str, tarikh, nama_kedai, f"{jumlah_val:.2f}", "Manual Input"]
+        append_to_sheet(row)
+
+        await update.message.reply_text(
+            "✅ Maklumat belanja anda telah direkodkan!\n"
+            f"🗓 Tarikh: {tarikh}\n"
+            f"🏪 Kedai: {nama_kedai}\n"
+            f"💰 Jumlah: RM {jumlah_val:.2f}\n\n"
+            "Terima kasih kerana menggunakan bot ini.\n"
+            "Taip /status untuk semak jumlah belanja anda."
+        )
+        context.user_data["expecting_manual_input"] = False
+    else:
+        await update.message.reply_text(
+            "Maaf, saya tidak faham. Sila pilih /help untuk panduan atau gunakan pilihan yang disediakan."
+        )
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("expecting_manual_input"):
+        await update.message.reply_text(
+            "Anda dalam mod taip belanja. Sila taip maklumat belanja atau taip /start untuk mula semula."
+        )
+        return
+
     photos = update.message.photo
     if not photos:
         await update.message.reply_text(
@@ -135,9 +200,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    photo_file = photos[-1]  # resolusi tertinggi
+    photo_file = photos[-1]
     file = await context.bot.get_file(photo_file.file_id)
     image_bytes = await file.download_as_bytearray()
+    image_bytes = bytes(image_bytes)  # ensure type bytes for OCR function
 
     text_detected = perform_ocr(image_bytes)
     if not text_detected.strip():
@@ -150,7 +216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jumlah = parse_amount(text_detected)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    row = [str(update.effective_chat.id), now_str, tarikh or "-", str(jumlah) if jumlah else "-", text_detected[:500]]
+    row = [str(update.effective_chat.id), now_str, tarikh or "-", jumlah or "-", "OCR Input"]
     append_to_sheet(row)
 
     reply_msg = (
@@ -162,43 +228,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(reply_msg)
 
+async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Maaf, saya tidak faham mesej itu.\n"
+        "Sila gunakan pilihan yang disediakan atau taip /help untuk panduan."
+    )
+
 # Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("status", status_command))
+application.add_handler(CommandHandler("ping", ping_command))
+
+application.add_handler(MessageHandler(filters.Regex("^(Taip Belanja|Hantar Resit)$"), handle_choice))
+application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_manual_input))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+application.add_handler(MessageHandler(filters.COMMAND, unknown_text))
 
-# Startup & shutdown events
-@app.on_event("startup")
-async def on_startup():
-    logger.info("Starting Telegram bot application...")
-    await application.initialize()
-    await application.start()
-    logger.info("Telegram bot application started.")
+# ====== Flask webhook setup ======
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    logger.info("Stopping Telegram bot application...")
-    await application.stop()
-    await application.shutdown()
-    logger.info("Telegram bot application stopped.")
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot1 Lapor Belanja is running."
 
-@app.post(f"/{BOT1_TOKEN}")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)  # Gunakan bot yang di-manage oleh application
-        await application.process_update(update)
-    except Exception as e:
-        logger.error(f"Error processing update: {e}")
-        raise HTTPException(status_code=400, detail="Failed to process update")
-    return {"status": "ok"}
-
-@app.get("/")
-async def root():
-    return {"message": "Bot1 LaporBelanja is running."}
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put(update)
+    return "OK"
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # Set your webhook url on Render or other hosting platform, e.g.
+    # https://yourdomain.com/{BOT_TOKEN}
+    application.run_polling()  # You can switch to webhook deployment on Render
+    # For webhook, run flask app: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
