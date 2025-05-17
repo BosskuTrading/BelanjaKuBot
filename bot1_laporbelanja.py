@@ -1,253 +1,143 @@
 import os
+import io
+import base64
 import logging
-import json
-import datetime
-from flask import Flask, request, abort
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from google.oauth2.service_account import Credentials
+from flask import Flask, request, jsonify
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import pytesseract
-from PIL import Image
-
-# Ambil token bot dari environment variable
-TOKEN_BOT1 = os.getenv("BOT1_TOKEN")
-if not TOKEN_BOT1:
-    raise RuntimeError("Missing BOT1_TOKEN environment variable!")
-
-SHEET_ID = os.getenv("SHEET_ID")
-if not SHEET_ID:
-    raise RuntimeError("Missing SHEET_ID environment variable!")
-
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
-if not GOOGLE_CREDENTIALS_JSON:
-    raise RuntimeError("Missing GOOGLE_CREDENTIALS_JSON environment variable!")
-
-# Decode JSON credentials dari env
-credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-credentials = Credentials.from_service_account_info(credentials_info)
-sheets_service = build('sheets', 'v4', credentials=credentials)
-
-DATA_FOLDER = "data_resit"
-if not os.path.exists(DATA_FOLDER):
-    os.makedirs(DATA_FOLDER)
-
-bot = Bot(token=TOKEN_BOT1)
-
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+from google.cloud import vision
+import requests
+from datetime import datetime
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-def save_image_file(photo_file, chat_id, timestamp):
-    filename = f"{chat_id}_{timestamp}.jpg"
-    filepath = os.path.join(DATA_FOLDER, filename)
-    photo_file.download(filepath)
-    return filepath
+# Environment variables
+BOT_TOKEN = os.getenv('BOT1_TOKEN')
+TELEGRAM_API_URL = f'https://api.telegram.org/bot{BOT_TOKEN}'
+SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
+GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
-def ocr_extract_text(image_path):
-    try:
-        img = Image.open(image_path)
-        text = pytesseract.image_to_string(img)
-        return text
-    except Exception as e:
-        logger.error(f"OCR failed: {e}")
+if not (BOT_TOKEN and SPREADSHEET_ID and GOOGLE_CREDENTIALS_BASE64):
+    raise Exception("Missing environment variables: BOT1_TOKEN, SPREADSHEET_ID, or GOOGLE_CREDENTIALS_BASE64")
+
+# Decode Google credentials from base64 env var
+credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
+with open('credentials.json', 'wb') as f:
+    f.write(credentials_json)
+
+credentials = service_account.Credentials.from_service_account_file('credentials.json')
+sheets_service = build('sheets', 'v4', credentials=credentials)
+
+# Vision client
+vision_client = vision.ImageAnnotatorClient.from_service_account_file('credentials.json')
+
+def send_message(chat_id, text):
+    url = TELEGRAM_API_URL + '/sendMessage'
+    payload = {'chat_id': chat_id, 'text': text}
+    resp = requests.post(url, json=payload)
+    if resp.status_code != 200:
+        logging.error(f'Failed to send message: {resp.text}')
+    return resp
+
+def extract_text_from_image(file_bytes):
+    image = vision.Image(content=file_bytes)
+    response = vision_client.text_detection(image=image)
+    texts = response.text_annotations
+    if response.error.message:
+        logging.error(f"Vision API error: {response.error.message}")
         return ""
+    if texts:
+        return texts[0].description
+    return ""
 
-def parse_expense_text(text):
-    lines = text.splitlines()
-    date_str = ""
-    time_str = ""
-    shop = ""
-    items = []
-    total_amount = 0.0
-    total_items = 0
+def parse_expense(text):
+    """
+    Cuba parsing kasar dari teks OCR untuk cari tarikh, total amount, kedai.
+    Ini contoh sangat mudah, boleh tambah regex lebih advanced.
+    """
+    import re
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Date detection yyyy-mm-dd or dd/mm/yyyy
-        if not date_str:
-            try:
-                date_obj = datetime.datetime.strptime(line, "%Y-%m-%d")
-                date_str = date_obj.strftime("%Y-%m-%d")
-                continue
-            except Exception:
-                pass
-            try:
-                date_obj = datetime.datetime.strptime(line, "%d/%m/%Y")
-                date_str = date_obj.strftime("%Y-%m-%d")
-                continue
-            except Exception:
-                pass
-        # Time detection hh:mm
-        if not time_str and ":" in line and len(line) <= 5:
-            time_str = line
-            continue
-        # Shop name (first non-date/time with letters)
-        if not shop and any(c.isalpha() for c in line):
-            shop = line
-            continue
-        # Item lines with RM amount
-        if "rm" in line.lower():
-            parts = line.lower().split("rm")
-            try:
-                amount = float(parts[-1].strip())
-                total_amount += amount
-                items.append(line)
-                total_items += 1
-            except Exception:
-                pass
-    if not date_str:
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    if not time_str:
-        time_str = datetime.datetime.now().strftime("%H:%M:%S")
+    # Cari tarikh (simple format dd/mm/yyyy atau dd-mm-yyyy)
+    date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', text)
+    date_str = date_match.group(1) if date_match else datetime.now().strftime('%Y-%m-%d')
 
-    return date_str, time_str, shop, items, total_items, total_amount
+    # Cari jumlah total (cari nombor dengan tanda titik atau koma)
+    amount_match = re.findall(r'(\d+[.,]\d{2})', text)
+    total_amount = amount_match[-1] if amount_match else '0.00'
 
-def append_to_sheet(row_data):
-    try:
-        sheet = sheets_service.spreadsheets()
-        sheet.values().append(
-            spreadsheetId=SHEET_ID,
-            range="Sheet1!A:G",
-            valueInputOption="USER_ENTERED",
-            body={"values": [row_data]},
-        ).execute()
-        return True
-    except Exception as e:
-        logger.error(f"Failed append to sheet: {e}")
-        return False
+    # Kedai: ambil baris pertama teks sebagai kedai (simple)
+    store = text.split('\n')[0].strip() if text else 'Unknown Store'
 
-# Telegram handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    await context.bot.send_message(chat_id=chat_id,
-        text=(f"Salam {user.first_name}! 👋\n"
-              "Hantar gambar resit atau teks belanja anda.\n"
-              "Saya akan simpan dan rekodkan untuk laporan.\n"
-              "Gunakan /help untuk bantuan.")
-    )
+    return date_str, store, total_amount
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id,
-        text=("Cara guna bot:\n"
-              "- Hantar gambar resit.\n"
-              "- Atau hantar teks dalam format:\n"
-              "  Tarikh, Masa, Kedai, Senarai item; Jumlah item; Jumlah harga\n"
-              "- Saya akan simpan data anda.")
-    )
+def append_to_sheet(row_values):
+    body = {'values': [row_values]}
+    sheet = sheets_service.spreadsheets().values()
+    result = sheet.append(spreadsheetId=SPREADSHEET_ID,
+                          range='Expenses!A:D',
+                          valueInputOption='USER_ENTERED',
+                          body=body).execute()
+    logging.info(f"Appended to sheet: {row_values}")
+    return result
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    timestamp = int(datetime.datetime.now().timestamp())
-    photos = update.message.photo
-    if not photos:
-        await update.message.reply_text("Tiada gambar dikesan.")
-        return
-    largest_photo = photos[-1]
-    photo_file = await context.bot.get_file(largest_photo.file_id)
-
-    filepath = save_image_file(photo_file, chat_id, timestamp)
-    logger.info(f"Saved photo to {filepath}")
-
-    text = ocr_extract_text(filepath)
-    logger.info(f"OCR text: {text}")
-
-    date_str, time_str, shop, items, total_items, total_amount = parse_expense_text(text)
-
-    row = [
-        date_str,
-        time_str,
-        shop,
-        "\n".join(items),
-        str(total_items),
-        f"{total_amount:.2f}",
-        str(chat_id),
-    ]
-
-    if append_to_sheet(row):
-        await update.message.reply_text(
-            f"Resit diterima dan direkodkan.\nTarikh: {date_str}\nKedai: {shop}\nJumlah: RM{total_amount:.2f}"
-        )
-    else:
-        await update.message.reply_text("Gagal simpan data ke Google Sheets.")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text
-
-    try:
-        parts = [p.strip() for p in text.split(",")]
-        if len(parts) < 4:
-            raise ValueError("Format salah, perlukan sekurang-kurangnya 4 bahagian")
-        date_str = parts[0]
-        time_str = parts[1]
-        shop = parts[2]
-        rest = ",".join(parts[3:])
-        if ";" in rest:
-            items_part, total_items_str, total_amount_str = [x.strip() for x in rest.split(";")]
-        else:
-            items_part = rest
-            total_items_str = "0"
-            total_amount_str = "0"
-
-        row = [
-            date_str,
-            time_str,
-            shop,
-            items_part,
-            total_items_str,
-            total_amount_str,
-            str(chat_id),
-        ]
-
-        if append_to_sheet(row):
-            await update.message.reply_text("Data belanja diterima dan direkodkan.")
-        else:
-            await update.message.reply_text("Gagal simpan data ke Google Sheets.")
-    except Exception as e:
-        logger.error(f"Error parsing text input: {e}")
-        await update.message.reply_text(
-            "Format teks salah. Sila hantar dalam format:\n"
-            "Tarikh, Masa, Kedai, Senarai item; Jumlah item; Jumlah harga\n"
-            "Contoh:\n2025-05-17, 10:30, Kedai ABC, Nasi Lemak 2 RM6.00; 2; 6.00"
-        )
-
-# Webhook route - synchronous (bukan async)
-@app.route(f"/{TOKEN_BOT1}", methods=["POST"])
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     try:
-        raw_data = request.data
-        logger.info(f"Raw request data: {raw_data}")
+        update = request.get_json(force=True)
+        logging.info(f"Update received: {update}")
 
-        json_data = request.get_json(force=True)
-        logger.info(f"Parsed JSON data: {json_data}")
+        message = update.get('message')
+        if not message:
+            return jsonify({'status': 'no message'}), 200
 
-        update = Update.de_json(json_data, bot)
+        chat_id = message['chat']['id']
+        text = message.get('text')
+        photos = message.get('photo')
 
-        # Letakkan update ke queue tanpa await sebab route sync
-        application.update_queue.put_nowait(update)
+        if text == '/start':
+            send_message(chat_id, "Selamat datang ke LaporBelanjaBot! Hantar gambar resit untuk direkod.")
+            return jsonify({'status': 'ok'}), 200
 
-        return "OK"
+        if photos:
+            # Dapatkan file_id photo terbesar (resolusi tertinggi)
+            photo_file = photos[-1]
+            file_id = photo_file['file_id']
+
+            # Dapatkan file_path dari Telegram
+            file_info_url = TELEGRAM_API_URL + f'/getFile?file_id={file_id}'
+            file_info = requests.get(file_info_url).json()
+            file_path = file_info['result']['file_path']
+
+            # Download file
+            file_url = f'https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}'
+            file_response = requests.get(file_url)
+            file_bytes = file_response.content
+
+            # Extract text dari gambar
+            ocr_text = extract_text_from_image(file_bytes)
+            logging.info(f"OCR Text:\n{ocr_text}")
+
+            # Parse data kasar
+            date_str, store, total_amount = parse_expense(ocr_text)
+
+            # Simpan ke Google Sheets
+            append_to_sheet([date_str, store, total_amount, datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+
+            reply_text = f"Terima kasih! Resit dari '{store}' dengan jumlah RM {total_amount} telah direkod."
+            send_message(chat_id, reply_text)
+            return jsonify({'status': 'ok'}), 200
+
+        else:
+            send_message(chat_id, "Sila hantar gambar resit untuk direkod.")
+            return jsonify({'status': 'no photo'}), 200
+
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        abort(400)
+        logging.error(f"Webhook error: {e}")
+        send_message(chat_id, "Maaf, berlaku ralat dalam proses. Sila cuba lagi.")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-if __name__ == "__main__":
-    application = ApplicationBuilder().token(TOKEN_BOT1).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # Run Flask app on PORT environment variable
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting Flask server on 0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    # Run Flask di localhost port 10000 (Render nanti set environment variable PORT)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
