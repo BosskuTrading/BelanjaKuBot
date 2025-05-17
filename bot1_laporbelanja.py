@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from datetime import datetime
 from flask import Flask, request, abort
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -44,7 +43,7 @@ def append_to_sheet(row):
     except Exception as e:
         logger.error(f"Error appending to sheet: {e}")
 
-# Dummy OCR
+# Dummy OCR (Replace with real OCR implementation)
 def perform_ocr(image_bytes):
     return "12/05/2025 MyKedai RM23.50"
 
@@ -219,16 +218,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    row = [str(update.effective_chat.id), now_str, tarikh, "Resit (OCR)", f"{jumlah:.2f}", "Photo"]
+    nama_menu = "Resit Gambar"
+    row = [str(update.effective_chat.id), now_str, tarikh, nama_menu, f"{jumlah:.2f}", "Gambar Resit"]
     append_to_sheet(row)
 
     await update.message.reply_text(
-        f"✅ Resit telah direkodkan.\n"
+        f"✅ Resit anda telah berjaya direkodkan!\n"
         f"🗓 Tarikh: {tarikh}\n"
         f"💰 Jumlah: RM {jumlah:.2f}\n\n"
-        "Terima kasih! Taip /status untuk semak jumlah belanja anda."
+        "Terima kasih kerana menggunakan bot ini.\n"
+        "Taip /status untuk semak jumlah belanja anda."
     )
 
+# Handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("ping", ping_command))
+application.add_handler(CommandHandler("status", status_command))
+application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+
+# Flask webhook route with token validation
 @app.route("/webhook/<token>", methods=["POST"])
 async def webhook(token):
     if token != BOT_TOKEN:
@@ -238,16 +248,6 @@ async def webhook(token):
     await application.update_queue.put(update)
     return "OK"
 
-def main():
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("ping", ping_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-    # Run Flask app on port 5000
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
-
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
