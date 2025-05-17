@@ -62,6 +62,49 @@ def parse_amount(text):
         return m.group(1).replace(",", ".")
     return None
 
+# ====== Flexible manual input parser ======
+def parse_flexible_input(text):
+    text = text.strip()
+
+    # 1. Cari tarikh (dd/mm/yyyy)
+    date_match = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text)
+    tarikh = None
+    if date_match:
+        tarikh_str = date_match.group(1)
+        try:
+            datetime.strptime(tarikh_str, "%d/%m/%Y")
+            tarikh = tarikh_str
+        except ValueError:
+            tarikh = None
+        # keluarkan tarikh dari text
+        text = text.replace(tarikh_str, "").strip()
+
+    # 2. Cari semua nombor decimal
+    amounts = re.findall(r"\d+(?:[\.,]\d+)?", text)
+    jumlah = None
+    if amounts:
+        jumlah_str = amounts[-1].replace(",", ".")
+        try:
+            jumlah = float(jumlah_str)
+        except ValueError:
+            jumlah = None
+        # keluarkan jumlah dari text
+        text = text.replace(amounts[-1], "").strip()
+
+    if jumlah is None:
+        return None  # tak jumpa jumlah valid
+
+    # 3. Apa yang tinggal dianggap nama kedai + menu
+    nama_menu = text.strip()
+    if not nama_menu:
+        return None
+
+    # Kalau tarikh tiada, guna tarikh hari ini
+    if tarikh is None:
+        tarikh = datetime.now().strftime("%d/%m/%Y")
+
+    return tarikh, nama_menu, jumlah
+
 # ====== Telegram Bot Setup ======
 BOT_TOKEN = os.getenv("BOT1_TOKEN")
 
@@ -76,6 +119,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         f"Hai {user_first_name}! 👋\n\n"
         "Saya adalah pembantu belanja anda.\n"
+        "Bot ini dibawakan oleh Fadirul Ezwan.\n\n"
         "Boleh pilih cara nak rekod belanja anda hari ini:\n"
         "👉 Taip belanja secara manual\n"
         "👉 Hantar gambar resit pembelian\n\n"
@@ -120,9 +164,16 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     if "taip belanja" in text:
         await update.message.reply_text(
-            "Sila taip maklumat belanja anda dalam format mudah seperti:\n\n"
-            "Tarikh(dd/mm/yyyy) NamaKedai Jumlah\n\n"
-            "Contoh:\n12/05/2025 MyKedai 23.50",
+            "Sila taip maklumat belanja anda mengandungi:\n\n"
+            "- Tarikh (optional) dalam format dd/mm/yyyy\n"
+            "- Nama kedai dan menu\n"
+            "- Jumlah (wajib ada)\n\n"
+            "Boleh taip dalam apa-apa susunan.\n\n"
+            "Contoh:\n"
+            "MyKedai Nasi Lemak 12/05/2025 23.50\n"
+            "23.50 Nasi Lemak MyKedai\n"
+            "Nasi Lemak 23.50\n"
+            "12/05/2025 23.50 MyKedai Nasi Lemak",
             reply_markup=ReplyKeyboardRemove()
         )
         context.user_data["expecting_manual_input"] = True
@@ -141,42 +192,32 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("expecting_manual_input"):
         text = update.message.text.strip()
-        parts = text.split()
-        if len(parts) < 3:
+        parsed = parse_flexible_input(text)
+        if not parsed:
             await update.message.reply_text(
-                "Format tidak betul. Sila taip semula dengan format:\n"
-                "Tarikh(dd/mm/yyyy) NamaKedai Jumlah\nContoh: 12/05/2025 MyKedai 23.50"
+                "Format tidak betul.\n"
+                "Sila taip maklumat belanja anda yang mengandungi:\n"
+                "- Tarikh (optional) dalam format dd/mm/yyyy\n"
+                "- Nama kedai dan menu (boleh di mana-mana sahaja)\n"
+                "- Jumlah (wajib ada)\n\n"
+                "Contoh:\n"
+                "MyKedai Nasi Lemak 12/05/2025 23.50\n"
+                "23.50 Nasi Lemak MyKedai\n"
+                "Nasi Lemak 23.50\n"
+                "12/05/2025 23.50 MyKedai Nasi Lemak"
             )
             return
 
-        tarikh, jumlah = parts[0], parts[-1]
-        nama_kedai = " ".join(parts[1:-1])
-
-        try:
-            datetime.strptime(tarikh, "%d/%m/%Y")
-        except ValueError:
-            await update.message.reply_text(
-                "Tarikh tidak sah. Sila guna format dd/mm/yyyy, contoh: 12/05/2025"
-            )
-            return
-
-        try:
-            jumlah_val = float(jumlah)
-        except ValueError:
-            await update.message.reply_text(
-                "Jumlah tidak sah. Sila taip nombor seperti 23.50"
-            )
-            return
-
+        tarikh, nama_menu, jumlah = parsed
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [str(update.effective_chat.id), now_str, tarikh, nama_kedai, f"{jumlah_val:.2f}", "Manual Input"]
+        row = [str(update.effective_chat.id), now_str, tarikh, nama_menu, f"{jumlah:.2f}", "Manual Input"]
         append_to_sheet(row)
 
         await update.message.reply_text(
             "✅ Maklumat belanja anda telah direkodkan!\n"
             f"🗓 Tarikh: {tarikh}\n"
-            f"🏪 Kedai: {nama_kedai}\n"
-            f"💰 Jumlah: RM {jumlah_val:.2f}\n\n"
+            f"🏪 Kedai + Menu: {nama_menu}\n"
+            f"💰 Jumlah: RM {jumlah:.2f}\n\n"
             "Terima kasih kerana menggunakan bot ini.\n"
             "Taip /status untuk semak jumlah belanja anda."
         )
@@ -187,94 +228,69 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("expecting_manual_input"):
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = await photo_file.download_as_bytearray()
+
+    # Placeholder: Gantikan dengan panggilan sebenar OCR
+    ocr_text = perform_ocr(photo_bytes)
+
+    # Cuba parse hasil OCR (example dummy parse)
+    tarikh = parse_date(ocr_text) or datetime.now().strftime("%d/%m/%Y")
+    jumlah_str = parse_amount(ocr_text)
+    if jumlah_str:
+        try:
+            jumlah = float(jumlah_str)
+        except ValueError:
+            jumlah = None
+    else:
+        jumlah = None
+
+    nama_menu = ocr_text
+    if tarikh:
+        nama_menu = nama_menu.replace(tarikh, "").strip()
+    if jumlah_str:
+        nama_menu = nama_menu.replace(jumlah_str, "").strip()
+    if not nama_menu:
+        nama_menu = "Unknown"
+
+    if jumlah is None:
         await update.message.reply_text(
-            "Anda dalam mod taip belanja. Sila taip maklumat belanja atau taip /start untuk mula semula."
+            "Maaf, saya tidak dapat kenal pasti jumlah belanja dari resit tersebut.\n"
+            "Sila taip maklumat belanja secara manual."
         )
         return
 
-    photos = update.message.photo
-    if not photos:
-        await update.message.reply_text(
-            "Maaf, gambar tidak ditemui. Sila cuba hantar semula."
-        )
-        return
-
-    photo_file = photos[-1]
-    file = await context.bot.get_file(photo_file.file_id)
-    image_bytes = await file.download_as_bytearray()
-    image_bytes = bytes(image_bytes)  # ensure type bytes for OCR function
-
-    text_detected = perform_ocr(image_bytes)
-    if not text_detected.strip():
-        await update.message.reply_text(
-            "Maaf, saya tidak dapat membaca resit. Sila cuba gambar yang lebih jelas."
-        )
-        return
-
-    tarikh = parse_date(text_detected)
-    jumlah = parse_amount(text_detected)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    row = [str(update.effective_chat.id), now_str, tarikh or "-", jumlah or "-", "OCR Input"]
+    row = [str(update.effective_chat.id), now_str, tarikh, nama_menu, f"{jumlah:.2f}", "Photo OCR"]
     append_to_sheet(row)
 
-    reply_msg = (
+    await update.message.reply_text(
         "✅ Resit anda telah direkodkan!\n"
-        f"🗓 Tarikh (jika dapat dikesan): {tarikh or '-'}\n"
-        f"💰 Jumlah (jika dapat dikesan): {jumlah or '-'}\n\n"
+        f"🗓 Tarikh: {tarikh}\n"
+        f"🏪 Kedai + Menu: {nama_menu}\n"
+        f"💰 Jumlah: RM {jumlah:.2f}\n\n"
         "Terima kasih kerana menggunakan bot ini.\n"
-        "Taip /status untuk semak jumlah resit anda."
+        "Taip /status untuk semak jumlah belanja anda."
     )
-    await update.message.reply_text(reply_msg)
 
-# Add handlers to the application
+# --- Main Dispatcher Registration ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("ping", ping_command))
 application.add_handler(CommandHandler("status", status_command))
-application.add_handler(MessageHandler(filters.Regex("^(Taip Belanja|Hantar Resit)$"), handle_choice))
+
+application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_choice))
 application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_manual_input))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-# ====== Flask Webhook Setup with proper asyncio loop handling ======
+# ====== Flask Webhook Setup ======
 
-bot_loop = None
-
-def run_bot_loop():
-    global bot_loop
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    bot_loop = asyncio.get_event_loop()
-
-    # Initialize and start bot application
-    bot_loop.run_until_complete(application.initialize())
-    bot_loop.run_until_complete(application.start())
-    logger.info("Telegram bot started and webhook ready")
-    bot_loop.run_forever()
-
-# Start bot loop in a separate thread
-threading.Thread(target=run_bot_loop, daemon=True).start()
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-    except Exception as e:
-        logger.error(f"Failed to parse update: {e}")
-        return "Bad Request", 400
-
-    future = asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
-    try:
-        # Optional wait for the update processing result, timeout short so not block long
-        future.result(timeout=5)
-    except Exception as e:
-        logger.error(f"Error processing update: {e}")
-
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.run(application.update_queue.put(update))
     return "OK"
 
 if __name__ == "__main__":
-    # When run locally for testing without Render, set webhook URL accordingly or use polling
-    from werkzeug.serving import run_simple
-    logger.info("Starting Flask server for bot1_laporbelanja")
-    run_simple("0.0.0.0", int(os.getenv("PORT", "5000")), app)
+    # Use threaded=True to allow Telegram processing alongside Flask
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), threaded=True)
