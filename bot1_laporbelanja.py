@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from datetime import datetime
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -254,8 +255,7 @@ def index():
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    # Guna put_nowait() untuk masukkan update ke queue tanpa await
-    application.update_queue.put_nowait(update)
+    asyncio.run(application.process_update(update))
     return "OK"
 
 if __name__ == "__main__":
