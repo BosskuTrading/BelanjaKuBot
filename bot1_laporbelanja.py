@@ -13,25 +13,34 @@ from telegram.ext import (
 )
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
+import base64
+import json
+import re
 
-# Setup logging
+# ====== Setup logging ======
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ====== Google Sheets Setup ======
+# ====== Environment variables ======
+BOT_TOKEN = os.getenv("BOT1_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 
-# Decode base64 credentials and create service
-import base64
-import json
+if not all([BOT_TOKEN, SPREADSHEET_ID, GOOGLE_CREDENTIALS_BASE64]):
+    logger.error("Sila set semua environment variables: BOT1_TOKEN, SPREADSHEET_ID, GOOGLE_CREDENTIALS_BASE64")
+    exit(1)
 
-credentials_dict = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
-credentials = Credentials.from_service_account_info(credentials_dict)
-sheet_service = build('sheets', 'v4', credentials=credentials)
-sheet = sheet_service.spreadsheets()
+# ====== Google Sheets setup ======
+try:
+    credentials_dict = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
+    credentials = Credentials.from_service_account_info(credentials_dict)
+    sheet_service = build('sheets', 'v4', credentials=credentials)
+    sheet = sheet_service.spreadsheets()
+except Exception as e:
+    logger.error(f"Gagal setup Google Sheets API: {e}")
+    exit(1)
 
 def append_to_sheet(row):
     try:
@@ -41,37 +50,33 @@ def append_to_sheet(row):
             valueInputOption="USER_ENTERED",
             body={"values": [row]},
         ).execute()
-        logger.info(f"Appended row: {row}")
+        logger.info(f"Berjaya tambah baris: {row}")
     except Exception as e:
-        logger.error(f"Error appending to sheet: {e}")
+        logger.error(f"Ralat tambah data ke Sheet: {e}")
 
-# ====== OCR / Parsing Dummy Functions ======
+# ====== OCR / Parsing Dummy ======
 def perform_ocr(image_bytes):
-    # Placeholder dummy OCR text - replace with actual OCR call like Google Vision API
+    # Dummy OCR - ganti dengan integrasi Google Vision API atau lain
     return "12/05/2025 MyKedai RM23.50"
 
 def parse_date(text):
-    # Extract date from OCR text - simplified
-    import re
     m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text)
     return m.group(1) if m else None
 
 def parse_amount(text):
-    import re
     m = re.search(r"RM?(\d+[\.,]?\d*)", text, re.IGNORECASE)
     if m:
         return m.group(1).replace(",", ".")
     return None
 
-# ====== Telegram Bot Setup ======
+# ====== Telegram bot setup ======
 
-BOT_TOKEN = os.getenv("BOT1_TOKEN")
 app = Flask(__name__)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 CHOICES = [["Taip Belanja", "Hantar Resit"]]
 
-# --- Command Handlers ---
+# ---- Command Handlers ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name or "Sahabat"
     welcome_msg = (
@@ -92,7 +97,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Pilih 'Hantar Resit' untuk hantar gambar resit pembelian.\n"
         "3. Saya akan rekod maklumat anda ke Google Sheets.\n"
         "4. Gunakan /status untuk semak berapa banyak resit yang anda dah hantar.\n"
-        "5. Gunakan /ping untuk semak sama ada bot ini sedang aktif.\n\n"
+        "5. Gunakan /ping untuk semak sama ada bot ini sedang aktif.\n"
+        "6. Gunakan /cancel untuk batal mod taip manual.\n\n"
         "Kalau ada sebarang masalah, sila hubungi admin ya."
     )
     await update.message.reply_text(help_msg, reply_markup=ReplyKeyboardRemove())
@@ -103,20 +109,26 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        range_ = "Sheet1!A:A"
-        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_).execute()
+        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A:A").execute()
         values = result.get("values", [])
         count = sum(1 for row in values if row and row[0] == str(chat_id))
         await update.message.reply_text(
             f"Anda telah menghantar {count} resit atau belanja ke bot ini. Terima kasih! 👍"
         )
     except Exception as e:
-        logger.error(f"Error getting status: {e}")
+        logger.error(f"Ralat semak status: {e}")
         await update.message.reply_text(
             "Maaf, saya tidak dapat semak status anda sekarang."
         )
 
-# --- Message Handlers ---
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["expecting_manual_input"] = False
+    await update.message.reply_text(
+        "Mode taip manual dibatalkan. Sila pilih /start untuk mula semula.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+# ---- Message Handlers ----
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     if "taip belanja" in text:
@@ -190,7 +202,7 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("expecting_manual_input"):
         await update.message.reply_text(
-            "Anda dalam mod taip belanja. Sila taip maklumat belanja atau taip /start untuk mula semula."
+            "Anda dalam mod taip belanja. Sila taip maklumat belanja atau taip /cancel untuk batal mod."
         )
         return
 
@@ -204,7 +216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file = photos[-1]
     file = await context.bot.get_file(photo_file.file_id)
     image_bytes = await file.download_as_bytearray()
-    image_bytes = bytes(image_bytes)  # ensure type bytes for OCR function
+    image_bytes = bytes(image_bytes)  # pastikan type bytes untuk OCR
 
     text_detected = perform_ocr(image_bytes)
     if not text_detected.strip():
@@ -235,11 +247,12 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Sila gunakan pilihan yang disediakan atau taip /help untuk panduan."
     )
 
-# Register handlers
+# ---- Register handlers ----
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("status", status_command))
 application.add_handler(CommandHandler("ping", ping_command))
+application.add_handler(CommandHandler("cancel", cancel_command))
 
 application.add_handler(MessageHandler(filters.Regex("^(Taip Belanja|Hantar Resit)$"), handle_choice))
 application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_manual_input))
@@ -247,7 +260,6 @@ application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 application.add_handler(MessageHandler(filters.COMMAND, unknown_text))
 
 # ====== Flask webhook setup ======
-
 @app.route("/", methods=["GET"])
 def index():
     return "Bot1 Lapor Belanja is running."
@@ -258,6 +270,7 @@ def webhook():
     asyncio.run(application.process_update(update))
     return "OK"
 
+# ====== Run Flask app ======
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
