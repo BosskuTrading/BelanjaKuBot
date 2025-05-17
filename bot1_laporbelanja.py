@@ -258,7 +258,5 @@ def webhook():
     return "OK"
 
 if __name__ == "__main__":
-    # Set your webhook url on Render or other hosting platform, e.g.
-    # https://yourdomain.com/{BOT_TOKEN}
-    application.run_polling()  # You can switch to webhook deployment on Render
-    # For webhook, run flask app: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
