@@ -1,102 +1,87 @@
 import os
-import io
 import base64
-import logging
-from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from google.oauth2 import service_account
+import json
+import datetime
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# Logging setup
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+BOT2_TOKEN = os.getenv('BOT2_TOKEN')
+SHEET_ID = os.getenv('SHEET_ID')
+GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
-# Environment Variables
-BOT2_TOKEN = os.getenv("BOT2_TOKEN")
-SHEET_ID = os.getenv("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+# Decode credentials JSON from base64 env
+credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
+credentials = Credentials.from_service_account_info(json.loads(credentials_json))
 
-# Google Sheets Setup
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
-if not GOOGLE_CREDENTIALS_BASE64:
-    raise ValueError("Environment variable 'GOOGLE_CREDENTIALS_BASE64' tidak diset!")
-
-# Decode Base64 dari environment
-try:
-    credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
-except Exception as e:
-    raise ValueError("❌ Gagal decode GOOGLE_CREDENTIALS_BASE64. Sila pastikan ia adalah Base64 yang sah.") from e
-
-credentials_io = io.BytesIO(credentials_json.encode('utf-8'))
-
-# Buat credentials object
-creds = service_account.Credentials.from_service_account_file(
-    credentials_io, scopes=SCOPES
-)
-
-# Setup Sheets API client
-service = build('sheets', 'v4', credentials=creds)
+service = build('sheets', 'v4', credentials=credentials)
 sheet = service.spreadsheets()
 
-# Fungsi bantu: tapis baris ikut tarikh
-def filter_by_date(rows, start_date):
-    total = 0.0
-    for row in rows:
-        if len(row) < 6:
-            continue
-        try:
-            row_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-            if row_date >= start_date:
-                total += float(row[5])
-        except Exception:
-            continue
-    return total
+bot = Bot(token=BOT2_TOKEN)
+app = Flask(__name__)
+dispatcher = Dispatcher(bot, None, workers=0)
 
-# Jana laporan untuk user
-def generate_report(user_id):
-    range_name = f"{user_id}!A:F"
-    result = sheet.values().get(spreadsheetId=SHEET_ID, range=range_name).execute()
-    values = result.get('values', [])
-
-    now = datetime.now()
-    last_week = now - timedelta(days=7)
-    last_month = now - timedelta(days=30)
-
-    total_week = filter_by_date(values, last_week)
-    total_month = filter_by_date(values, last_month)
-
-    report = (
-        f"📊 *Laporan Belanja Anda*\n\n"
-        f"🗓️ Minggu lepas: RM {total_week:.2f}\n"
-        f"📅 Bulan ini: RM {total_month:.2f}"
+def start(update, context):
+    update.message.reply_text(
+        "Selamat datang ke LaporanBelanjaBot!\n"
+        "Gunakan /laporan untuk dapatkan laporan perbelanjaan mingguan dan bulanan anda."
     )
-    return report
 
-# Command /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hai! Saya bot laporan. Guna /laporan untuk lihat ringkasan belanja mingguan & bulanan.")
+def get_user_expenses(chat_id):
+    # Contoh: Tarik data dari sheet
+    # Anggap sheet simpan dengan kolom: chat_id | date | shop | total_amount
+    result = sheet.values().get(spreadsheetId=SHEET_ID, range="Sheet1!A2:D").execute()
+    rows = result.get('values', [])
+    user_data = []
+    for row in rows:
+        if len(row) < 4:
+            continue
+        row_chat_id = row[0]
+        if str(row_chat_id) == str(chat_id):
+            user_data.append({
+                'date': row[1],
+                'shop': row[2],
+                'total_amount': float(row[3])
+            })
+    return user_data
 
-# Command /laporan
-async def laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    try:
-        report = generate_report(user_id)
-        await update.message.reply_text(report, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Gagal hasilkan laporan: {e}")
-        await update.message.reply_text("❌ Gagal hasilkan laporan. Pastikan anda telah hantar resit kepada Bot 1.")
+def laporan(update, context):
+    chat_id = update.message.chat_id
+    data = get_user_expenses(chat_id)
+    if not data:
+        update.message.reply_text("Tiada rekod perbelanjaan anda ditemui.")
+        return
+    
+    today = datetime.date.today()
+    one_week_ago = today - datetime.timedelta(days=7)
+    one_month_ago = today - datetime.timedelta(days=30)
+    
+    # Kira jumlah perbelanjaan mingguan & bulanan
+    weekly_total = sum(d['total_amount'] for d in data if datetime.datetime.strptime(d['date'], '%Y-%m-%d').date() >= one_week_ago)
+    monthly_total = sum(d['total_amount'] for d in data if datetime.datetime.strptime(d['date'], '%Y-%m-%d').date() >= one_month_ago)
 
-# Main
-def main():
-    app = Application.builder().token(BOT2_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("laporan", laporan))
-    app.run_polling()
+    message = (
+        f"Laporan Perbelanjaan Anda:\n\n"
+        f"Jumlah perbelanjaan minggu lalu: RM {weekly_total:.2f}\n"
+        f"Jumlah perbelanjaan bulan ini: RM {monthly_total:.2f}\n"
+        f"Terima kasih menggunakan LaporBelanjaBot!"
+    )
+    update.message.reply_text(message)
 
-if __name__ == "__main__":
-    main()
+dispatcher.add_handler(CommandHandler('start', start))
+dispatcher.add_handler(CommandHandler('laporan', laporan))
+
+@app.route(f'/{BOT2_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return 'ok'
+
+@app.route('/')
+def index():
+    return 'LaporanBelanjaBot running.'
+
+if __name__ == '__main__':
+    app.run(port=10001)
