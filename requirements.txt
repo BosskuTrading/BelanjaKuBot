@@ -14,3 +14,4 @@ pytz
 gspread==5.7.2
 google-cloud-vision==3.9.0
 fastapi==0.95.2
+uvicorn[standard]
