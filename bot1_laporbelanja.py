@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from fastapi import FastAPI, Request, HTTPException
-from telegram import Bot, Update
+from telegram import Update
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -43,10 +43,8 @@ sheet = sheets_service.spreadsheets()
 vision_client = vision_v1.ImageAnnotatorClient(credentials=credentials)
 
 app = FastAPI()
-bot = Bot(token=BOT1_TOKEN)
-application = Application.builder().token(BOT1_TOKEN).build()
 
-# Handlers (same as before) ...
+application = Application.builder().token(BOT1_TOKEN).build()
 
 def append_to_sheet(row_values):
     try:
@@ -60,8 +58,38 @@ def append_to_sheet(row_values):
     except HttpError as e:
         logger.error(f"Google Sheets API error: {e}")
 
-# ... (other helper functions here) ...
+def parse_date(text):
+    # Contoh ekstrak tarikh dari teks, boleh diubah ikut format resit anda
+    # Cari tarikh dalam bentuk dd/mm/yyyy atau yyyy-mm-dd
+    patterns = [
+        r"(\d{2}/\d{2}/\d{4})",
+        r"(\d{4}-\d{2}-\d{2})"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return None
 
+def parse_amount(text):
+    # Cari jumlah dalam bentuk RM, Rp, atau nombor desimal
+    pattern = r"(?:RM|Rp)?\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)"
+    matches = re.findall(pattern, text.replace(',', ''))
+    if matches:
+        # Return nilai terbesar - biasanya jumlah akhir
+        amounts = [float(m) for m in matches]
+        return max(amounts)
+    return None
+
+def perform_ocr(image_bytes):
+    image = vision_v1.Image(content=image_bytes)
+    response = vision_client.text_detection(image=image)
+    texts = response.text_annotations
+    if texts:
+        return texts[0].description
+    return ""
+
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name or "there"
     welcome_msg = (
@@ -99,14 +127,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Maaf, saya tidak dapat semak status anda sekarang."
         )
 
-def perform_ocr(image_bytes):
-    image = vision_v1.Image(content=image_bytes)
-    response = vision_client.text_detection(image=image)
-    texts = response.text_annotations
-    if texts:
-        return texts[0].description
-    return ""
-
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photos = update.message.photo
     if not photos:
@@ -130,7 +150,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jumlah = parse_amount(text_detected)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    row = [str(update.effective_chat.id), now_str, tarikh, jumlah, text_detected[:500]]
+    row = [str(update.effective_chat.id), now_str, tarikh or "-", str(jumlah) if jumlah else "-", text_detected[:500]]
     append_to_sheet(row)
 
     reply_msg = (
@@ -148,8 +168,7 @@ application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("status", status_command))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-
-# **Tambahkan event startup & shutdown untuk initialize dan stop aplikasi**
+# Startup & shutdown events
 @app.on_event("startup")
 async def on_startup():
     logger.info("Starting Telegram bot application...")
@@ -168,7 +187,7 @@ async def on_shutdown():
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
-        update = Update.de_json(data, bot)
+        update = Update.de_json(data, application.bot)  # Gunakan bot yang di-manage oleh application
         await application.process_update(update)
     except Exception as e:
         logger.error(f"Error processing update: {e}")
