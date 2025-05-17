@@ -1,135 +1,158 @@
 import os
-import base64
-import datetime
+import json
 import logging
+import datetime
+import base64
+import asyncio
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackContext
-from google.oauth2.service_account import Credentials
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+BOT2_TOKEN = os.getenv("BOT2_TOKEN") or "YOUR_BOT2_TOKEN"
+SHEET_ID = os.getenv("SHEET_ID") or "YOUR_SHEET_ID"
+GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-BOT_TOKEN = os.getenv("BOT2_TOKEN")
-SHEET_ID = os.getenv("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+bot = Bot(token=BOT2_TOKEN)
+application = Application.builder().token(BOT2_TOKEN).build()
 
 def get_gsheet_service():
-    creds_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-    creds = Credentials.from_service_account_info(eval(creds_json.decode("utf-8")),
-                                                  scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    cred_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
+    creds_dict = json.loads(cred_json)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
     service = build('sheets', 'v4', credentials=creds)
-    return service
+    return service.spreadsheets()
 
-def get_all_expenses():
-    service = get_gsheet_service()
-    sheet = service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=SHEET_ID, range="Sheet1!A:G").execute()
-    values = result.get('values', [])
-    return values
+gsheet = get_gsheet_service()
 
-def get_user_expenses(chat_id, start_date, end_date):
-    expenses = []
-    all_expenses = get_all_expenses()
-    for row in all_expenses:
+async def fetch_user_expenses(chat_id: int, start_date: str, end_date: str):
+    # Fetch rows from Google Sheet for given user and date range
+    sheet_data = gsheet.values().get(spreadsheetId=SHEET_ID, range="Sheet1!A2:H").execute()
+    rows = sheet_data.get("values", [])
+    filtered = []
+    for r in rows:
+        # Columns: date, time, location, items, total_items, total_amount, fullname, userid
         try:
-            row_date = datetime.datetime.strptime(row[0], "%Y-%m-%d").date()
-            row_chat_id = int(row[6])
-            if row_chat_id == chat_id and start_date <= row_date <= end_date:
-                expenses.append(row)
-        except:
+            row_date = r[0]
+            row_userid = int(r[7])
+            if row_userid == chat_id and start_date <= row_date <= end_date:
+                filtered.append(r)
+        except Exception:
             continue
-    return expenses
+    return filtered
 
-def sum_expenses(expenses):
-    total = 0
-    for row in expenses:
-        try:
-            total += float(row[5])
-        except:
-            continue
-    return total
-
-users_set = set()
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users_set.add(update.effective_chat.id)
-    await update.message.reply_text(
-        "Selamat datang ke LaporanBelanjaBot!\n"
-        "Gunakan /laporanmingguan untuk laporan mingguan.\n"
-        "Gunakan /laporanbulanan untuk laporan bulanan."
-    )
-
-async def laporan_mingguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def create_report(chat_id: int, report_type: str):
     today = datetime.date.today()
-    start_week = today - datetime.timedelta(days=today.weekday())
-    end_week = start_week + datetime.timedelta(days=6)
-    expenses = get_user_expenses(chat_id, start_week, end_week)
-    total = sum_expenses(expenses)
-    await update.message.reply_text(
-        f"Laporan belanja anda dari {start_week} hingga {end_week}:\nJumlah perbelanjaan: RM {total:.2f}"
-    )
-
-async def laporan_bulanan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    today = datetime.date.today()
-    start_month = today.replace(day=1)
-    if today.month == 12:
-        next_month = today.replace(year=today.year + 1, month=1, day=1)
+    if report_type == "harian":
+        start_date = (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        end_date = start_date
+    elif report_type == "mingguan":
+        start_date = (today - datetime.timedelta(days=today.weekday() + 7)).strftime("%Y-%m-%d")  # last Monday
+        end_date = (today - datetime.timedelta(days=today.weekday() + 1)).strftime("%Y-%m-%d")    # last Sunday
+    elif report_type == "bulanan":
+        first_day_last_month = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+        last_day_last_month = today.replace(day=1) - datetime.timedelta(days=1)
+        start_date = first_day_last_month.strftime("%Y-%m-%d")
+        end_date = last_day_last_month.strftime("%Y-%m-%d")
     else:
-        next_month = today.replace(month=today.month + 1, day=1)
-    end_month = next_month - datetime.timedelta(days=1)
-    expenses = get_user_expenses(chat_id, start_month, end_month)
-    total = sum_expenses(expenses)
-    await update.message.reply_text(
-        f"Laporan belanja anda bulan {today.month}/{today.year}:\nJumlah perbelanjaan: RM {total:.2f}"
-    )
+        return None
 
-async def daily_report(context: CallbackContext):
+    expenses = await fetch_user_expenses(chat_id, start_date, end_date)
+    if not expenses:
+        return f"Tiada rekod perbelanjaan untuk {report_type} dari {start_date} hingga {end_date}."
+
+    total_amount = 0.0
+    total_items = 0
+    details = []
+    for r in expenses:
+        details.append(f"{r[0]} {r[2]}: {r[3]} (RM{r[5]})")
+        try:
+            total_amount += float(r[5])
+            total_items += int(r[4])
+        except:
+            pass
+
+    report = (
+        f"Laporan belanja {report_type} ({start_date} hingga {end_date}):\n\n"
+        + "\n".join(details)
+        + f"\n\nJumlah barang: {total_items}\nJumlah belanja: RM{total_amount:.2f}"
+    )
+    return report
+
+async def send_report(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     chat_id = job.chat_id
-    today = datetime.date.today()
-    expenses = get_user_expenses(chat_id, today, today)
-    total = sum_expenses(expenses)
+    report_type = job.name
+    logger.info(f"Sending {report_type} report to {chat_id}")
+    report_text = await create_report(chat_id, report_type)
+    if report_text:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=report_text)
+        except Exception as e:
+            logger.error(f"Failed to send report to {chat_id}: {e}")
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Selamat datang ke LaporanBelanjaBot!\n"
+        "Bot ini akan menghantar laporan harian, mingguan dan bulanan secara automatik pada pukul 8 pagi."
+    )
+
+async def laporan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Sedang menyediakan laporan harian anda...")
+    chat_id = update.effective_chat.id
+    report = await create_report(chat_id, "harian")
+    await update.message.reply_text(report)
+
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("laporan", laporan_command))
+
+# Scheduler untuk auto hantar laporan pukul 8 pagi setiap hari
+scheduler = AsyncIOScheduler()
+
+def schedule_reports_for_user(chat_id: int):
+    # Buang kerja lama jika ada
+    scheduler.remove_job(f"harian_{chat_id}", jobstore=None, silent=True)
+    scheduler.add_job(
+        send_report,
+        "cron",
+        hour=8,
+        minute=0,
+        id=f"harian_{chat_id}",
+        name="harian",
+        args=[],
+        kwargs={"job": None},
+        replace_existing=True,
+        misfire_grace_time=300,
+        kwargs={"chat_id": chat_id}
+    )
+    # Sama boleh tambah mingguan dan bulanan di sini (ikut jadual)
+
+@app.route(f"/{BOT2_TOKEN}", methods=["POST"])
+def webhook():
     try:
-        await context.bot.send_message(chat_id=chat_id, text=f"Laporan belanja harian untuk {today}:\nJumlah: RM {total:.2f}")
+        data = request.get_json(force=True)
+        logger.info(f"Update received: {data}")
+        update = Update.de_json(data, bot)
+        asyncio.run(application.process_update(update))
+        return "OK"
     except Exception as e:
-        logger.error(f"Failed to send daily report to {chat_id}: {e}")
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return "Error", 500
 
-application = Application.builder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("laporanmingguan", laporan_mingguan))
-application.add_handler(CommandHandler("laporanbulanan", laporan_bulanan))
-
-# Atur jadual daily report pukul 8 pagi (UTC+8)
-from telegram.ext import ApplicationBuilder, JobQueue
-
-async def schedule_daily_reports(app: Application):
-    # schedule daily reports for all users
-    for user_chat_id in users_set:
-        # 8am Malaysia time = 00:00 UTC (Malaysia is UTC+8)
-        app.job_queue.run_daily(daily_report, time=datetime.time(hour=0, minute=0, second=0), chat_id=user_chat_id)
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "OK"
+@app.route("/")
+def index():
+    return "LaporanBelanjaBot running!"
 
 if __name__ == "__main__":
-    import asyncio
-    port = int(os.environ.get("PORT", 10001))
-
-    # Start app with scheduled jobs
-    async def main():
-        await schedule_daily_reports(application)
-        await application.initialize()
-        await application.start()
-        app.run(host="0.0.0.0", port=port)
-
-    asyncio.run(main())
+    # Start scheduler
+    scheduler.start()
+    app.run(host="0.0.0.0", port=10001)

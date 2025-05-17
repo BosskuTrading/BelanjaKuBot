@@ -1,231 +1,259 @@
 import os
 import io
-import base64
-import datetime
+import json
 import logging
-from flask import Flask, request
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from google.oauth2.service_account import Credentials
+import datetime
+import asyncio
+from flask import Flask, request, send_from_directory
+from telegram import Update, Bot, InputFile
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, ConversationHandler
+)
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from PIL import Image
-import pytesseract  # pastikan pytesseract dan Tesseract OCR installed di server
 
-logging.basicConfig(level=logging.INFO)
+# --- Konfigurasi ---
+BOT1_TOKEN = os.getenv("BOT1_TOKEN") or "YOUR_BOT1_TOKEN"
+SHEET_ID = os.getenv("SHEET_ID") or "YOUR_SHEET_ID"
+GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")  # Base64 encoded service account json
+RECEIPT_IMAGE_DIR = "receipts"  # Folder simpan gambar resit
+
+if not os.path.exists(RECEIPT_IMAGE_DIR):
+    os.makedirs(RECEIPT_IMAGE_DIR)
+
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+bot = Bot(token=BOT1_TOKEN)
 
-BOT_TOKEN = os.getenv("BOT1_TOKEN")
-SHEET_ID = os.getenv("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
-
-# States untuk ConversationHandler
-(ASK_LOCATION, ASK_MORE_ITEMS, ASK_UPLOAD_IMAGE) = range(3)
-
-# Simpan sementara data user sebelum save ke Sheets
-user_data_cache = {}
-
-# Setup Google Sheets API
+# --- Google Sheets Setup ---
 def get_gsheet_service():
-    creds_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-    creds = Credentials.from_service_account_info(eval(creds_json.decode("utf-8")),
-                                                  scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    import base64
+    cred_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
+    creds_dict = json.loads(cred_json)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
     service = build('sheets', 'v4', credentials=creds)
-    return service
+    return service.spreadsheets()
 
-def append_row_to_sheet(row):
-    service = get_gsheet_service()
-    sheet = service.spreadsheets()
-    sheet.values().append(
+gsheet = get_gsheet_service()
+
+# --- Google Sheet Helper ---
+def append_row_to_sheet(row_data):
+    """Append a row (list) to Google Sheet"""
+    body = {'values': [row_data]}
+    result = gsheet.values().append(
         spreadsheetId=SHEET_ID,
-        range="Sheet1!A:G",
+        range="Sheet1!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": [row]}
+        body=body
     ).execute()
+    logger.info(f"Appended to sheet: {row_data}")
+    return result
 
-# Simpan gambar ke folder 'receipt_images' di lokal
-def save_receipt_image(file_bytes, chat_id):
-    folder = "receipt_images"
-    os.makedirs(folder, exist_ok=True)
-    filename = f"{folder}/{chat_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    with open(filename, "wb") as f:
-        f.write(file_bytes)
-    return filename
+# --- Conversation States ---
+ASK_LOCATION, ASK_MORE_ITEMS, ASK_UPLOAD_IMAGE = range(3)
 
-# Ekstrak data kasar dari gambar OCR
-def extract_receipt_data(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes))
-    text = pytesseract.image_to_string(image, lang='eng')
-    logger.info(f"OCR Text: {text}")
+# --- Temporary user session data store ---
+user_sessions = {}
 
-    # Contoh simple parse - anda boleh tambah parse yang lebih advance
-    # Cari tarikh (YYYY-MM-DD / DD/MM/YYYY), jumlah, kedai, dan item ringkas
-    import re
-    date_pattern = r'(\d{4}[-/]\d{2}[-/]\d{2})|(\d{2}[/]\d{2}[/]\d{4})'
-    amount_pattern = r'Total\s*:?\s*RM?(\d+\.\d{2})'
-    shop_pattern = r'(?:Shop|Store|Kedai|Merchant)\s*:\s*(.*)'
-
-    tarikh = re.search(date_pattern, text)
-    jumlah = re.search(amount_pattern, text, re.IGNORECASE)
-    kedai = re.search(shop_pattern, text, re.IGNORECASE)
-
-    tarikh_str = tarikh.group(0) if tarikh else datetime.date.today().strftime("%Y-%m-%d")
-    jumlah_str = jumlah.group(1) if jumlah else "0.00"
-    kedai_str = kedai.group(1).strip() if kedai else "Unknown"
-
-    # Items (just demo, ambil baris yg ada harga)
-    items = []
-    for line in text.split('\n'):
-        if re.search(r'\d+\.\d{2}', line):
-            items.append(line.strip())
-    jumlah_items = len(items)
-
-    return tarikh_str, kedai_str, items, jumlah_items, jumlah_str
+# --- Bot Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     await update.message.reply_text(
-        "Selamat datang ke LaporBelanjaBot!\n"
-        "Hantar resit gambar atau taip maklumat belanja anda.\n"
-        "Contoh: nasi ayam rm10.50\n"
-        "Bot akan bantu anda simpan rekod."
+        f"Salam {user.first_name}! 👋\n"
+        "Sila hantar maklumat belanja anda hari ini.\n"
+        "Contoh: Nasi ayam RM10.50\n"
+        "Atau hantar gambar resit untuk rekod."
     )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.lower()
-
-    # Cuba detect ringkas jumlah dan barang
-    import re
-    amt = re.findall(r'(\d+\.\d{2})', text)
-    if amt:
-        jumlah = amt[-1]
-    else:
-        jumlah = None
-
-    # Simpan data sementara
-    user_data_cache[chat_id] = {
-        "tarikh": datetime.date.today().strftime("%Y-%m-%d"),
-        "masa": datetime.datetime.now().strftime("%H:%M:%S"),
-        "lokasi": None,
-        "items": [text],
-        "jumlah_items": 1,
-        "jumlah_belanja": jumlah,
-        "chat_id": chat_id
+    user_sessions[user.id] = {
+        "items": [],
+        "location": None,
+        "total_amount": 0.0,
+        "chat_id": update.effective_chat.id,
+        "date": datetime.date.today().strftime("%Y-%m-%d"),
+        "time": datetime.datetime.now().strftime("%H:%M:%S"),
     }
-
-    if user_data_cache[chat_id]["lokasi"] is None:
-        await update.message.reply_text("Di mana lokasi/kedai belanja ini?")
-        return ASK_LOCATION
-    else:
-        await update.message.reply_text("Ada lagi barang lain?")
-        return ASK_MORE_ITEMS
+    return ASK_LOCATION
 
 async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    lokasi = update.message.text
-    if chat_id in user_data_cache:
-        user_data_cache[chat_id]["lokasi"] = lokasi
-    await update.message.reply_text("Ada lagi barang lain? Kalau sudah, hantar gambar resit atau taip 'tidak'.")
+    text = update.message.text
+    user_id = update.effective_user.id
+
+    # Check if user is in session
+    session = user_sessions.get(user_id, None)
+    if not session:
+        await update.message.reply_text("Sila mula semula dengan /start")
+        return ConversationHandler.END
+
+    # Try parse simple input like "nasi ayam rm10.50"
+    # We expect location if not present, so ask location
+    session["last_item"] = text  # Save for later use if needed
+
+    await update.message.reply_text(
+        "Di mana lokasi/kedai anda beli barang ini?"
+        "\nSila taip nama kedai atau lokasi."
+    )
     return ASK_MORE_ITEMS
 
 async def ask_more_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.lower()
+    location = update.message.text.strip()
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id, None)
 
-    if text in ['tidak', 'tak', 'no']:
-        await update.message.reply_text("Sila upload gambar resit untuk simpan rekod, atau taip 'skip' untuk terus simpan data.")
-        return ASK_UPLOAD_IMAGE
-    else:
-        if chat_id in user_data_cache:
-            user_data_cache[chat_id]["items"].append(text)
-            user_data_cache[chat_id]["jumlah_items"] += 1
-        await update.message.reply_text("Ada lagi barang lain? Kalau sudah, hantar gambar resit atau taip 'tidak'.")
-        return ASK_MORE_ITEMS
-
-async def ask_upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.lower()
-    if text == "skip":
-        # Simpan data tanpa gambar
-        data = user_data_cache.get(chat_id)
-        if data:
-            row = [
-                data["tarikh"],
-                data["masa"],
-                data["lokasi"],
-                "\n".join(data["items"]),
-                data["jumlah_items"],
-                data["jumlah_belanja"] or "0.00",
-                str(chat_id)
-            ]
-            append_row_to_sheet(row)
-            await update.message.reply_text("Data belanja anda telah disimpan. Terima kasih!")
-            user_data_cache.pop(chat_id, None)
-        else:
-            await update.message.reply_text("Tiada data untuk disimpan.")
+    if not session:
+        await update.message.reply_text("Sila mula semula dengan /start")
         return ConversationHandler.END
-    else:
-        await update.message.reply_text("Sila hantar gambar resit sekarang.")
-        return ASK_UPLOAD_IMAGE
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    photo_file = await update.message.photo[-1].get_file()
-    photo_bytes = await photo_file.download_as_bytearray()
-
-    tarikh, kedai, items, jumlah_items, jumlah_belanja = extract_receipt_data(photo_bytes)
-    filename = save_receipt_image(photo_bytes, chat_id)
-
-    # Simpan ke Google Sheets
-    row = [
-        tarikh,
-        datetime.datetime.now().strftime("%H:%M:%S"),
-        kedai,
-        "\n".join(items),
-        jumlah_items,
-        jumlah_belanja,
-        str(chat_id)
-    ]
-    append_row_to_sheet(row)
+    session["location"] = location
+    # Simpan last item yang dihantar sebagai item pertama
+    item = session.get("last_item", "")
+    session["items"].append(item)
 
     await update.message.reply_text(
-        f"Resit telah diproses dan disimpan.\n"
-        f"Tarikh: {tarikh}\n"
-        f"Kedai: {kedai}\n"
-        f"Jumlah items: {jumlah_items}\n"
-        f"Jumlah belanja: RM{jumlah_belanja}\n"
-        f"Fail gambar disimpan: {filename}"
+        "Ada barang lain yang anda mahu tambah? (Ya/Tidak)"
     )
+    return ASK_UPLOAD_IMAGE
+
+async def ask_upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id, None)
+
+    if not session:
+        await update.message.reply_text("Sila mula semula dengan /start")
+        return ConversationHandler.END
+
+    if text in ("ya", "y", "yes"):
+        await update.message.reply_text("Sila taip barang berikutnya dan jumlahnya:")
+        return ASK_MORE_ITEMS
+    elif text in ("tidak", "t", "no", "n"):
+        await update.message.reply_text(
+            "Sila hantar gambar resit (jika ada), atau taip 'Selesai' untuk simpan maklumat."
+        )
+        return ASK_UPLOAD_IMAGE
+    elif text == "selesai":
+        # Simpan ke Google Sheets
+        return await save_data(update, context)
+    else:
+        # Check if this is image or text for more items
+        if update.message.photo:
+            # Process image receipt
+            await save_receipt_image(update, context)
+            await update.message.reply_text("Terima kasih! Data anda telah disimpan.")
+            user_sessions.pop(user_id, None)
+            return ConversationHandler.END
+        else:
+            # Treat as new item line
+            session["items"].append(text)
+            await update.message.reply_text("Ada barang lain? (Ya/Tidak)")
+            return ASK_UPLOAD_IMAGE
+
+async def save_receipt_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id, None)
+    if not session:
+        await update.message.reply_text("Sila mula semula dengan /start")
+        return ConversationHandler.END
+
+    photo_file = await update.message.photo[-1].get_file()
+    filename = f"{user_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    filepath = os.path.join(RECEIPT_IMAGE_DIR, filename)
+    await photo_file.download_to_drive(filepath)
+    logger.info(f"Saved receipt image to {filepath}")
+
+    # NOTE: Anda boleh letak kod OCR di sini untuk auto-extract data dari gambar.
+
+async def save_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id, None)
+    if not session:
+        await update.message.reply_text("Sila mula semula dengan /start")
+        return ConversationHandler.END
+
+    # Kira jumlah item & jumlah belanja kasar
+    total_items = len(session["items"])
+    # Untuk demo, jumlah belanja anda boleh parse dari item (contoh 'nasi ayam rm10.50')
+    total_amount = 0.0
+    for item in session["items"]:
+        # Cari pattern RM10.50 dalam text item
+        import re
+        m = re.search(r"rm\s?(\d+\.?\d*)", item, re.IGNORECASE)
+        if m:
+            total_amount += float(m.group(1))
+
+    # Simpan data ke Google Sheets
+    row = [
+        session["date"],
+        session["time"],
+        session["location"],
+        "; ".join(session["items"]),
+        total_items,
+        round(total_amount, 2),
+        update.effective_user.full_name,
+        user_id,
+    ]
+
+    append_row_to_sheet(row)
+    await update.message.reply_text(
+        f"Rekod perbelanjaan disimpan:\n"
+        f"Tarikh: {session['date']}\n"
+        f"Waktu: {session['time']}\n"
+        f"Lokasi: {session['location']}\n"
+        f"Items: {row[3]}\n"
+        f"Jumlah items: {total_items}\n"
+        f"Jumlah belanja: RM {round(total_amount,2)}"
+    )
+    user_sessions.pop(user_id, None)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data_cache.pop(update.effective_chat.id, None)
-    await update.message.reply_text("Transaksi dibatalkan.")
+    user_sessions.pop(update.effective_user.id, None)
+    await update.message.reply_text("Perbualan dibatalkan. Sila mula semula bila-bila masa dengan /start.")
     return ConversationHandler.END
 
-application = Application.builder().token(BOT_TOKEN).build()
-
+# --- Setup Conversation Handler ---
 conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text), MessageHandler(filters.PHOTO, handle_photo)],
+    entry_points=[CommandHandler("start", start)],
     states={
         ASK_LOCATION: [MessageHandler(filters.TEXT & (~filters.COMMAND), ask_location)],
-        ASK_MORE_ITEMS: [MessageHandler(filters.TEXT & (~filters.COMMAND), ask_more_items), MessageHandler(filters.PHOTO, handle_photo)],
-        ASK_UPLOAD_IMAGE: [MessageHandler(filters.PHOTO, handle_photo), MessageHandler(filters.TEXT & (~filters.COMMAND), ask_upload_image)]
+        ASK_MORE_ITEMS: [MessageHandler(filters.TEXT & (~filters.COMMAND), ask_more_items)],
+        ASK_UPLOAD_IMAGE: [
+            MessageHandler(filters.PHOTO, save_receipt_image),
+            MessageHandler(filters.TEXT & (~filters.COMMAND), ask_upload_image)
+        ],
     },
-    fallbacks=[CommandHandler("cancel", cancel)]
+    fallbacks=[CommandHandler("cancel", cancel)],
+    allow_reentry=True,
 )
 
-application.add_handler(CommandHandler("start", start))
+application = Application.builder().token(BOT1_TOKEN).build()
 application.add_handler(conv_handler)
 
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "OK"
+# --- Flask webhook route ---
+@app.route(f"/{BOT1_TOKEN}", methods=["POST"])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+        logger.info(f"Update received: {data}")
+        update = Update.de_json(data, bot)
+        asyncio.run(application.process_update(update))
+        return "OK"
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return "Error", 500
+
+@app.route("/")
+def index():
+    return "LaporBelanjaBot running!"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
