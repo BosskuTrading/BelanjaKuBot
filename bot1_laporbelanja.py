@@ -1,205 +1,106 @@
 import os
 import logging
-from datetime import datetime
-from io import BytesIO
-
-from flask import Flask, request, jsonify
+import asyncio
+from flask import Flask, request
 from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
-
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- Config ---
+BOT1_TOKEN = os.getenv("BOT1_TOKEN")
+SHEET_ID = os.getenv("SHEET_ID")
+GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+UPLOAD_FOLDER = "./uploads"
+
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+# --- Setup logging ---
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# States for ConversationHandler
-NAMA_BARANG, LOKASI, BARANG_LAIN, RESIT = range(4)
-
-# Load environment variables
-BOT1_TOKEN = os.environ.get("BOT1_TOKEN")
-SHEET_ID = os.environ.get("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
-
-if not all([BOT1_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS_BASE64]):
-    raise Exception("Sila setkan environment variables: BOT1_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS_BASE64")
-
-# Decode Google Credentials JSON from base64
+# --- Setup Google Sheets ---
 import base64
 import json
-credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-credentials_dict = json.loads(credentials_json)
+credentials_json = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
+credentials = Credentials.from_service_account_info(credentials_json)
+gc = gspread.authorize(credentials)
+sheet = gc.open_by_key(SHEET_ID).sheet1
 
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
-gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SHEET_ID).sheet1  # Assuming first sheet
-
-# Create Flask app
+# --- Setup Telegram Bot & Flask app ---
 app = Flask(__name__)
-bot = Bot(token=BOT1_TOKEN)
+bot = Bot(BOT1_TOKEN)
+application = ApplicationBuilder().token(BOT1_TOKEN).build()
 
-# Folder to save receipt images
-RECEIPT_FOLDER = "receipts"
-os.makedirs(RECEIPT_FOLDER, exist_ok=True)
+# --- Bot commands ---
 
-# Helper function to save receipt photo
-def save_photo(photo_file, user_id):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{user_id}_{timestamp}.jpg"
-    filepath = os.path.join(RECEIPT_FOLDER, filename)
-    photo_file.download(filepath)
-    return filepath
-
-# Start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "Selamat datang ke *LaporBelanjaBot*!\n\n"
-        "Anda boleh mula merekod belanja anda dengan mudah.\n"
-        "Contoh: hantar maklumat seperti `Nasi Ayam RM10.50` dan saya akan bantu anda.\n"
-        "Bot akan tanya lokasi kedai, barang lain dan minta upload gambar resit jika ada.\n\n"
-        "Untuk batalkan proses, taip /cancel."
+    welcome_msg = (
+        "Selamat datang ke LaporBelanjaBot!\n\n"
+        "Kirimkan butiran belanja anda seperti:\n"
+        "- Hantar teks (contoh: nasi ayam 10.50)\n"
+        "- Atau gambar resit.\n"
+        "Bot akan simpan rekod anda secara automatik."
     )
-    await update.message.reply_markdown(welcome_text)
-    return NAMA_BARANG
+    await update.message.reply_text(welcome_msg)
 
-# Receive first item and price
-async def nama_barang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    context.user_data['items'] = []
-    context.user_data['items'].append(text)
-    await update.message.reply_text("Terima kasih! Sila berikan lokasi atau nama kedai:")
-    return LOKASI
-
-# Receive location / store name
-async def lokasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['location'] = update.message.text.strip()
-    await update.message.reply_text(
-        "Ada lagi barang yang anda beli? Sila senaraikan (contoh: Teh O RM2.00), atau taip 'Tiada'."
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_msg = (
+        "Cara guna bot ini:\n"
+        "1. Hantar teks contoh: 'Nasi ayam 10.50'\n"
+        "2. Bot akan tanya lokasi kedai dan item lain jika mahu.\n"
+        "3. Atau terus hantar gambar resit.\n"
+        "4. Bot akan simpan maklumat ke Google Sheets."
     )
-    return BARANG_LAIN
+    await update.message.reply_text(help_msg)
 
-# Receive additional items or finish
-async def barang_lain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text.lower() == 'tiada':
-        await update.message.reply_text(
-            "Jika ada gambar resit, sila upload sekarang, jika tidak taip 'Tiada'."
-        )
-        return RESIT
-    else:
-        context.user_data['items'].append(text)
-        await update.message.reply_text("Ada lagi barang lain? Senaraikan atau taip 'Tiada'.")
-        return BARANG_LAIN
+# Simpan teks belanja user ke Google Sheets (contoh mudah)
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    text = update.message.text
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Receive photo or skip
-async def resit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    # Simpan row: user_id, datetime, text
+    sheet.append_row([user.id, now, text])
 
-    if update.message.photo:
-        largest_photo = update.message.photo[-1]
-        file = await largest_photo.get_file()
-        filepath = save_photo(file, user_id)
-        await update.message.reply_text("Gambar resit diterima dan disimpan.")
-        context.user_data['receipt_path'] = filepath
-    elif update.message.text and update.message.text.lower() == 'tiada':
-        await update.message.reply_text("Tiada gambar resit. Rekod disimpan.")
-        context.user_data['receipt_path'] = None
-    else:
-        await update.message.reply_text("Sila hantar gambar resit atau taip 'Tiada'.")
-        return RESIT
+    await update.message.reply_text("Terima kasih! Maklumat belanja anda telah direkod.")
 
-    # Save record to Google Sheets
-    try:
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H:%M:%S")
-        location = context.user_data.get('location', '')
-        items = context.user_data.get('items', [])
-        total_items = len(items)
+# Simpan gambar resit
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    photos = update.message.photo
+    photo_file = photos[-1].get_file()
+    filename = f"{user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    await photo_file.download_to_drive(filepath)
 
-        # Calculate total amount from items text: parse numbers from text (e.g. 'Nasi Ayam RM10.50')
-        total_amount = 0.0
-        for item in items:
-            # Find last number in string (simple)
-            import re
-            found = re.findall(r"RM(\d+\.?\d*)", item, re.IGNORECASE)
-            if found:
-                total_amount += float(found[-1])
+    await update.message.reply_text("Gambar resit diterima dan disimpan. Terima kasih!")
 
-        # Prepare row data for Google Sheets
-        row = [
-            date_str,
-            time_str,
-            location,
-            " | ".join(items),
-            total_items,
-            f"{total_amount:.2f}"
-        ]
-
-        sheet.append_row(row)
-        await update.message.reply_text("Rekod belanja berjaya disimpan ke Google Sheets. Terima kasih!")
-    except Exception as e:
-        logger.error(f"Error simpan ke Google Sheets: {e}")
-        await update.message.reply_text("Maaf, berlaku masalah simpan data. Sila cuba lagi.")
-
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Proses dibatalkan. Jika mahu mula semula, taip /start.")
-    return ConversationHandler.END
-
-# Telegram webhook route for Flask
-@app.route(f'/{BOT1_TOKEN}', methods=['POST'])
+# Flask route untuk webhook
+@app.route(f"/{BOT1_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    application = app.telegram_app
-    application.update_queue.put(update)
-    return jsonify({"status": "ok"})
+    asyncio.create_task(application.update_queue.put(update))
+    return "OK"
 
-# Setup webhook automatically (call once or via separate command)
-async def set_webhook():
-    url = os.environ.get("WEBHOOK_URL")  # e.g. https://yourdomain.com/{BOT1_TOKEN}
-    if not url:
-        logger.error("WEBHOOK_URL environment variable belum set")
-        return
-    webhook_url = f"{url}/{BOT1_TOKEN}"
-    await bot.set_webhook(webhook_url)
-    logger.info(f"Webhook set to {webhook_url}")
+# Route root untuk cek server hidup
+@app.route("/")
+def index():
+    return "LaporBelanjaBot is running"
 
-def main():
-    application = ApplicationBuilder().token(BOT1_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            NAMA_BARANG: [MessageHandler(filters.TEXT & ~filters.COMMAND, nama_barang)],
-            LOKASI: [MessageHandler(filters.TEXT & ~filters.COMMAND, lokasi)],
-            BARANG_LAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, barang_lain)],
-            RESIT: [
-                MessageHandler(filters.PHOTO, resit),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, resit),
-            ],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-
-    application.add_handler(conv_handler)
-
-    # Save application instance to Flask app for webhook
-    app.telegram_app = application
-
-    # Run webhook server on port 10000 (Render default)
-    import asyncio
-
-    # Run set_webhook asynchronously once before running app (optional)
-    asyncio.run(set_webhook())
-
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# Tambah handler ke aplikasi telegram
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", "10000"))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT1_TOKEN,
+        webhook_url=f"https://YOUR_DOMAIN_OR_RENDER_URL/{BOT1_TOKEN}"
+    )
