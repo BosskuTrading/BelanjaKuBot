@@ -11,3 +11,4 @@ python-dotenv
 requests
 pyTelegramBotAPI
 pytz
+gspread==5.7.2
