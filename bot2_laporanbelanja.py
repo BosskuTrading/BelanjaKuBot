@@ -1,103 +1,113 @@
 import os
-import base64
 import json
-import datetime
+import base64
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from google.oauth2.service_account import Credentials
+from telegram import Update, Bot
+from telegram.ext import Dispatcher, CommandHandler
+import datetime
+import pytz
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import asyncio
 
-# ======= AMBIL ENVIRONMENT VARIABLE ===========
-BOT2_TOKEN = os.getenv('BOT2_TOKEN')
-SHEET_ID = os.getenv('SHEET_ID')
-GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
+# Set timezone ke Malaysia
+tz = pytz.timezone("Asia/Kuala_Lumpur")
 
-if not (BOT2_TOKEN and SHEET_ID and GOOGLE_CREDENTIALS_BASE64):
+# Ambil env vars
+BOT_TOKEN = os.environ.get("BOT2_TOKEN")
+SHEET_ID = os.environ.get("SHEET_ID")
+CREDENTIALS_B64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+
+if not BOT_TOKEN or not SHEET_ID or not CREDENTIALS_B64:
     raise Exception("Sila setkan environment variables: BOT2_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS_BASE64")
 
-# ======= DECODE GOOGLE CREDENTIALS JSON =======
-credentials_info = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
-credentials = Credentials.from_service_account_info(credentials_info)
+# Decode credential Google
+creds_dict = json.loads(base64.b64decode(CREDENTIALS_B64).decode())
+credentials = service_account.Credentials.from_service_account_info(
+    creds_dict,
+    scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+)
 
-# ======= GOOGLE SHEETS API CLIENT ===========
+# Inisialisasi Google Sheets API
 service = build('sheets', 'v4', credentials=credentials)
 sheet = service.spreadsheets()
 
-# ======= FLASK & TELEGRAM BOT SETUP =========
+# Setup Flask dan Telegram bot
 app = Flask(__name__)
-application = ApplicationBuilder().token(BOT2_TOKEN).build()
-
-# ======= COMMAND HANDLERS ===========
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Selamat datang ke LaporanBelanjaBot!\n"
-        "Gunakan /laporan untuk dapatkan ringkasan perbelanjaan mingguan dan bulanan anda."
-    )
+bot = Bot(token=BOT_TOKEN)
 
 def get_user_expenses(chat_id):
-    # Tarik semua data dari Sheet (anggap sheet ada kolum: chat_id | date(YYYY-MM-DD) | shop | total_amount)
-    RANGE = "Sheet1!A2:D"
-    result = sheet.values().get(spreadsheetId=SHEET_ID, range=RANGE).execute()
-    rows = result.get('values', [])
-    user_data = []
-    for row in rows:
-        if len(row) < 4:
-            continue
-        row_chat_id, date_str, shop, amount_str = row
-        if str(row_chat_id) == str(chat_id):
+    result = sheet.values().get(spreadsheetId=SHEET_ID, range="Belanja!A2:H").execute()
+    values = result.get('values', [])
+    expenses = []
+
+    for row in values:
+        if len(row) >= 8 and row[1] == str(chat_id):
             try:
-                total_amount = float(amount_str)
-                user_data.append({
-                    'date': date_str,
-                    'shop': shop,
-                    'total_amount': total_amount
+                date_obj = datetime.datetime.strptime(row[0], "%Y-%m-%d").replace(tzinfo=tz)
+                expenses.append({
+                    "date": date_obj,
+                    "shop": row[4],
+                    "total": float(row[7])
                 })
             except:
                 continue
-    return user_data
+    return expenses
 
-async def laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def calculate_report(expenses, period='minggu'):
+    now = datetime.datetime.now(tz)
+    if period == 'minggu':
+        start = now - datetime.timedelta(days=now.weekday())  # start of week
+    elif period == 'bulan':
+        start = now.replace(day=1)  # start of month
+    else:
+        start = datetime.datetime.min.replace(tzinfo=tz)
+
+    total = sum(e['total'] for e in expenses if e['date'] >= start)
+    return total
+
+# Handlers
+def start(update: Update, context):
+    update.message.reply_text("📊 Selamat datang ke *Laporan Belanja Bot*!\n\nGuna arahan berikut:\n/laporan - Lihat semua belanja\n/mingguan - Laporan minggu ini\n/bulanan - Laporan bulan ini", parse_mode="Markdown")
+
+def laporan(update: Update, context):
     chat_id = update.message.chat_id
-    data = get_user_expenses(chat_id)
-    if not data:
-        await update.message.reply_text("Maaf, tiada rekod perbelanjaan anda ditemui.")
-        return
+    expenses = get_user_expenses(chat_id)
+    total = sum(e['total'] for e in expenses)
+    update.message.reply_text(f"📋 Jumlah belanja keseluruhan: RM{total:.2f}")
 
-    today = datetime.date.today()
-    one_week_ago = today - datetime.timedelta(days=7)
-    one_month_ago = today - datetime.timedelta(days=30)
+def mingguan(update: Update, context):
+    chat_id = update.message.chat_id
+    expenses = get_user_expenses(chat_id)
+    total = calculate_report(expenses, 'minggu')
+    update.message.reply_text(f"🗓️ Jumlah belanja *minggu ini*: RM{total:.2f}", parse_mode="Markdown")
 
-    weekly_total = sum(d['total_amount'] for d in data if datetime.datetime.strptime(d['date'], '%Y-%m-%d').date() >= one_week_ago)
-    monthly_total = sum(d['total_amount'] for d in data if datetime.datetime.strptime(d['date'], '%Y-%m-%d').date() >= one_month_ago)
+def bulanan(update: Update, context):
+    chat_id = update.message.chat_id
+    expenses = get_user_expenses(chat_id)
+    total = calculate_report(expenses, 'bulan')
+    update.message.reply_text(f"📆 Jumlah belanja *bulan ini*: RM{total:.2f}", parse_mode="Markdown")
 
-    message = (
-        f"Laporan Perbelanjaan Anda:\n\n"
-        f"Jumlah perbelanjaan minggu lalu: RM {weekly_total:.2f}\n"
-        f"Jumlah perbelanjaan bulan ini: RM {monthly_total:.2f}\n\n"
-        f"Terima kasih menggunakan LaporBelanjaBot!"
-    )
-    await update.message.reply_text(message)
-
-# Register handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("laporan", laporan))
-
-# ===== FLASK WEBHOOK ROUTE =====
-@app.route(f'/{BOT2_TOKEN}', methods=['POST'])
+# Setup webhook
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
-    return 'ok'
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK"
 
-@app.route('/')
+# Root check
+@app.route("/", methods=["GET", "HEAD"])
 def index():
-    return "Bot2 LaporanBelanjaBot is running."
+    return "Bot 2 Laporan Belanja Aktif!"
 
-# ===== MAIN RUN =====
+# Dispatcher setup
+from telegram.ext import Dispatcher
+dispatcher = Dispatcher(bot, None, workers=0)
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("laporan", laporan))
+dispatcher.add_handler(CommandHandler("mingguan", mingguan))
+dispatcher.add_handler(CommandHandler("bulanan", bulanan))
+
+# Run app
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10001))
-app.run(host="0.0.0.0", port=port)
-
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
