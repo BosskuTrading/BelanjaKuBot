@@ -28,7 +28,6 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 if not all([BOT1_TOKEN, SPREADSHEET_ID, GOOGLE_CREDENTIALS_BASE64]):
     raise Exception("Missing environment variables: BOT1_TOKEN, SPREADSHEET_ID, or GOOGLE_CREDENTIALS_BASE64")
 
-# Decode Google credentials
 credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
 credentials_info = json.loads(credentials_json)
 credentials = service_account.Credentials.from_service_account_info(
@@ -39,16 +38,15 @@ credentials = service_account.Credentials.from_service_account_info(
     ],
 )
 
-# Setup Google Sheets API
 sheets_service = build("sheets", "v4", credentials=credentials)
 sheet = sheets_service.spreadsheets()
-
-# Setup Google Vision client (OCR)
 vision_client = vision_v1.ImageAnnotatorClient(credentials=credentials)
 
 app = FastAPI()
 bot = Bot(token=BOT1_TOKEN)
 application = Application.builder().token(BOT1_TOKEN).build()
+
+# Handlers (same as before) ...
 
 def append_to_sheet(row_values):
     try:
@@ -62,34 +60,7 @@ def append_to_sheet(row_values):
     except HttpError as e:
         logger.error(f"Google Sheets API error: {e}")
 
-def parse_date(text):
-    # Try to extract date in formats like YYYY-MM-DD or DD/MM/YYYY
-    date_patterns = [
-        r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})",  # 2023-05-17 or 2023/05/17
-        r"(\d{1,2}[-/]\d{1,2}[-/]\d{4})",  # 17-05-2023 or 17/05/2023
-    ]
-    for pattern in date_patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return ""
-
-def parse_amount(text):
-    # Simple regex to find amounts like 12.34, 1,234.56 or 1234.56
-    amount_patterns = [
-        r"\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b",  # Matches 1,234.56 or 1234.56
-        r"\b(\d+\.\d{2})\b",  # Matches 12.34
-    ]
-    for pattern in amount_patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            # Ambil nilai max sebab biasanya jumlah besar
-            try:
-                nums = [float(m.replace(",", "")) for m in matches]
-                return f"{max(nums):.2f}"
-            except:
-                continue
-    return ""
+# ... (other helper functions here) ...
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_first_name = update.effective_user.first_name or "there"
@@ -115,7 +86,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        # Query Google Sheets untuk kira berapa rekod ada utk chat_id ini
         range_ = "Sheet1!A:A"
         result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_).execute()
         values = result.get("values", [])
@@ -156,7 +126,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Cuba parse tarikh dan jumlah
     tarikh = parse_date(text_detected)
     jumlah = parse_amount(text_detected)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -179,12 +148,27 @@ application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("status", status_command))
 application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
+
+# **Tambahkan event startup & shutdown untuk initialize dan stop aplikasi**
+@app.on_event("startup")
+async def on_startup():
+    logger.info("Starting Telegram bot application...")
+    await application.initialize()
+    await application.start()
+    logger.info("Telegram bot application started.")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Stopping Telegram bot application...")
+    await application.stop()
+    await application.shutdown()
+    logger.info("Telegram bot application stopped.")
+
 @app.post(f"/{BOT1_TOKEN}")
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         update = Update.de_json(data, bot)
-        # Betulkan: perlu hantar argumen update ke process_update()
         await application.process_update(update)
     except Exception as e:
         logger.error(f"Error processing update: {e}")
