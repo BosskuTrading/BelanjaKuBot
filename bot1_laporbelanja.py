@@ -1,26 +1,34 @@
 import os
-import io
-import json
 import logging
+import json
 import datetime
-import asyncio
-from flask import Flask, request, send_from_directory
+import io
+from flask import Flask, request, abort
 from telegram import Update, Bot, InputFile
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters,
-    ContextTypes, ConversationHandler
-)
-from google.oauth2 import service_account
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+import pytesseract
+from PIL import Image
 
-# --- Konfigurasi ---
-BOT1_TOKEN = os.getenv("BOT1_TOKEN") or "YOUR_BOT1_TOKEN"
-SHEET_ID = os.getenv("SHEET_ID") or "YOUR_SHEET_ID"
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")  # Base64 encoded service account json
-RECEIPT_IMAGE_DIR = "receipts"  # Folder simpan gambar resit
+# --- CONFIG ---
+TOKEN_BOT1 = os.getenv("TOKEN_BOT1") or "7699481497:AAER-3i09Z8X52Tp8vpUgiW8VDBydOmNU8k"
+SHEET_ID = os.getenv("SHEET_ID") or "1h2br8RSuvuNVydz-4sKXalziottO4QHwtSVP8v1RECQ"
+DATA_FOLDER = "data_resit"
 
-if not os.path.exists(RECEIPT_IMAGE_DIR):
-    os.makedirs(RECEIPT_IMAGE_DIR)
+if not os.path.exists(DATA_FOLDER):
+    os.makedirs(DATA_FOLDER)
+
+# Load Google Credentials JSON from env
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+if not GOOGLE_CREDENTIALS_JSON:
+    raise RuntimeError("Missing Google Credentials in GOOGLE_CREDENTIALS_JSON env var")
+
+credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+credentials = Credentials.from_service_account_info(credentials_info)
+sheets_service = build('sheets', 'v4', credentials=credentials)
+
+bot = Bot(token=TOKEN_BOT1)
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -29,231 +37,237 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-bot = Bot(token=BOT1_TOKEN)
 
-# --- Google Sheets Setup ---
-def get_gsheet_service():
-    import base64
-    cred_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
-    creds_dict = json.loads(cred_json)
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    service = build('sheets', 'v4', credentials=creds)
-    return service.spreadsheets()
+# --- HELPERS ---
 
-gsheet = get_gsheet_service()
+def save_image_file(photo_file, chat_id, timestamp):
+    """
+    Save Telegram photo file locally with unique filename
+    """
+    filename = f"{chat_id}_{timestamp}.jpg"
+    filepath = os.path.join(DATA_FOLDER, filename)
+    photo_file.download(filepath)
+    return filepath
 
-# --- Google Sheet Helper ---
-def append_row_to_sheet(row_data):
-    """Append a row (list) to Google Sheet"""
-    body = {'values': [row_data]}
-    result = gsheet.values().append(
-        spreadsheetId=SHEET_ID,
-        range="Sheet1!A1",
-        valueInputOption="USER_ENTERED",
-        body=body
-    ).execute()
-    logger.info(f"Appended to sheet: {row_data}")
-    return result
+def ocr_extract_text(image_path):
+    """
+    Use pytesseract to extract text from image file
+    """
+    try:
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        return text
+    except Exception as e:
+        logger.error(f"OCR failed: {e}")
+        return ""
 
-# --- Conversation States ---
-ASK_LOCATION, ASK_MORE_ITEMS, ASK_UPLOAD_IMAGE = range(3)
+def parse_expense_text(text):
+    """
+    Basic parsing to extract: date, time, shop name, items, total amount
+    (This can be improved as needed)
+    """
+    lines = text.splitlines()
+    date_str = ""
+    time_str = ""
+    shop = ""
+    items = []
+    total_amount = 0.0
+    total_items = 0
 
-# --- Temporary user session data store ---
-user_sessions = {}
+    # Simple heuristics example:
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Try date format (yyyy-mm-dd or dd/mm/yyyy)
+        if not date_str:
+            try:
+                date_obj = datetime.datetime.strptime(line, "%Y-%m-%d")
+                date_str = date_obj.strftime("%Y-%m-%d")
+                continue
+            except Exception:
+                pass
+            try:
+                date_obj = datetime.datetime.strptime(line, "%d/%m/%Y")
+                date_str = date_obj.strftime("%Y-%m-%d")
+                continue
+            except Exception:
+                pass
+        # Try time format hh:mm
+        if not time_str:
+            if ":" in line and len(line) <= 5:
+                time_str = line
+                continue
+        # Shop name: first non-date/time line
+        if not shop and any(c.isalpha() for c in line):
+            shop = line
+            continue
+        # Items and total
+        # Example line: "Nasi Lemak 2 RM6.00"
+        if "rm" in line.lower():
+            parts = line.lower().split("rm")
+            try:
+                amount = float(parts[-1].strip())
+                total_amount += amount
+                items.append(line)
+                total_items += 1
+            except Exception:
+                pass
+    if not date_str:
+        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    if not time_str:
+        time_str = datetime.datetime.now().strftime("%H:%M:%S")
+    return date_str, time_str, shop, items, total_items, total_amount
 
-# --- Bot Handlers ---
+def append_to_sheet(row_data):
+    """
+    Append one row of data to Google Sheets
+    """
+    try:
+        sheet = sheets_service.spreadsheets()
+        sheet.values().append(
+            spreadsheetId=SHEET_ID,
+            range="Sheet1!A:G",
+            valueInputOption="USER_ENTERED",
+            body={"values": [row_data]},
+        ).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Failed append to sheet: {e}")
+        return False
+
+# --- Telegram Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     user = update.effective_user
-    await update.message.reply_text(
-        f"Salam {user.first_name}! 👋\n"
-        "Sila hantar maklumat belanja anda hari ini.\n"
-        "Contoh: Nasi ayam RM10.50\n"
-        "Atau hantar gambar resit untuk rekod."
-    )
-    user_sessions[user.id] = {
-        "items": [],
-        "location": None,
-        "total_amount": 0.0,
-        "chat_id": update.effective_chat.id,
-        "date": datetime.date.today().strftime("%Y-%m-%d"),
-        "time": datetime.datetime.now().strftime("%H:%M:%S"),
-    }
-    return ASK_LOCATION
-
-async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-
-    # Check if user is in session
-    session = user_sessions.get(user_id, None)
-    if not session:
-        await update.message.reply_text("Sila mula semula dengan /start")
-        return ConversationHandler.END
-
-    # Try parse simple input like "nasi ayam rm10.50"
-    # We expect location if not present, so ask location
-    session["last_item"] = text  # Save for later use if needed
-
-    await update.message.reply_text(
-        "Di mana lokasi/kedai anda beli barang ini?"
-        "\nSila taip nama kedai atau lokasi."
-    )
-    return ASK_MORE_ITEMS
-
-async def ask_more_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location = update.message.text.strip()
-    user_id = update.effective_user.id
-    session = user_sessions.get(user_id, None)
-
-    if not session:
-        await update.message.reply_text("Sila mula semula dengan /start")
-        return ConversationHandler.END
-
-    session["location"] = location
-    # Simpan last item yang dihantar sebagai item pertama
-    item = session.get("last_item", "")
-    session["items"].append(item)
-
-    await update.message.reply_text(
-        "Ada barang lain yang anda mahu tambah? (Ya/Tidak)"
-    )
-    return ASK_UPLOAD_IMAGE
-
-async def ask_upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().lower()
-    user_id = update.effective_user.id
-    session = user_sessions.get(user_id, None)
-
-    if not session:
-        await update.message.reply_text("Sila mula semula dengan /start")
-        return ConversationHandler.END
-
-    if text in ("ya", "y", "yes"):
-        await update.message.reply_text("Sila taip barang berikutnya dan jumlahnya:")
-        return ASK_MORE_ITEMS
-    elif text in ("tidak", "t", "no", "n"):
-        await update.message.reply_text(
-            "Sila hantar gambar resit (jika ada), atau taip 'Selesai' untuk simpan maklumat."
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"Salam {user.first_name}! 👋\n"
+            "Hantar gambar resit atau teks belanja anda.\n"
+            "Saya akan simpan dan rekodkan untuk laporan.\n"
+            "Gunakan /help untuk bantuan."
         )
-        return ASK_UPLOAD_IMAGE
-    elif text == "selesai":
-        # Simpan ke Google Sheets
-        return await save_data(update, context)
-    else:
-        # Check if this is image or text for more items
-        if update.message.photo:
-            # Process image receipt
-            await save_receipt_image(update, context)
-            await update.message.reply_text("Terima kasih! Data anda telah disimpan.")
-            user_sessions.pop(user_id, None)
-            return ConversationHandler.END
-        else:
-            # Treat as new item line
-            session["items"].append(text)
-            await update.message.reply_text("Ada barang lain? (Ya/Tidak)")
-            return ASK_UPLOAD_IMAGE
+    )
 
-async def save_receipt_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = user_sessions.get(user_id, None)
-    if not session:
-        await update.message.reply_text("Sila mula semula dengan /start")
-        return ConversationHandler.END
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "Cara guna bot ini:\n"
+            "- Hantar gambar resit.\n"
+            "- Atau hantar teks belanja seperti:\n"
+            "  Tarikh, Masa, Kedai, Senarai item, Jumlah item, Jumlah harga\n"
+            "- Saya akan simpan dan rekod.\n"
+            "Laporan akan dihantar oleh bot laporan."
+        )
+    )
 
-    photo_file = await update.message.photo[-1].get_file()
-    filename = f"{user_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    filepath = os.path.join(RECEIPT_IMAGE_DIR, filename)
-    await photo_file.download_to_drive(filepath)
-    logger.info(f"Saved receipt image to {filepath}")
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    timestamp = int(datetime.datetime.now().timestamp())
+    photos = update.message.photo
+    if not photos:
+        await update.message.reply_text("Tiada gambar dikesan.")
+        return
+    largest_photo = photos[-1]
+    photo_file = await context.bot.get_file(largest_photo.file_id)
 
-    # NOTE: Anda boleh letak kod OCR di sini untuk auto-extract data dari gambar.
+    # Save image
+    filepath = save_image_file(photo_file, chat_id, timestamp)
+    logger.info(f"Saved photo to {filepath}")
 
-async def save_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = user_sessions.get(user_id, None)
-    if not session:
-        await update.message.reply_text("Sila mula semula dengan /start")
-        return ConversationHandler.END
+    # OCR extract
+    text = ocr_extract_text(filepath)
+    logger.info(f"OCR text: {text}")
 
-    # Kira jumlah item & jumlah belanja kasar
-    total_items = len(session["items"])
-    # Untuk demo, jumlah belanja anda boleh parse dari item (contoh 'nasi ayam rm10.50')
-    total_amount = 0.0
-    for item in session["items"]:
-        # Cari pattern RM10.50 dalam text item
-        import re
-        m = re.search(r"rm\s?(\d+\.?\d*)", item, re.IGNORECASE)
-        if m:
-            total_amount += float(m.group(1))
+    # Parse text
+    date_str, time_str, shop, items, total_items, total_amount = parse_expense_text(text)
 
-    # Simpan data ke Google Sheets
+    # Prepare row data
     row = [
-        session["date"],
-        session["time"],
-        session["location"],
-        "; ".join(session["items"]),
-        total_items,
-        round(total_amount, 2),
-        update.effective_user.full_name,
-        user_id,
+        date_str,
+        time_str,
+        shop,
+        "\n".join(items),
+        str(total_items),
+        f"{total_amount:.2f}",
+        str(chat_id),
     ]
 
-    append_row_to_sheet(row)
-    await update.message.reply_text(
-        f"Rekod perbelanjaan disimpan:\n"
-        f"Tarikh: {session['date']}\n"
-        f"Waktu: {session['time']}\n"
-        f"Lokasi: {session['location']}\n"
-        f"Items: {row[3]}\n"
-        f"Jumlah items: {total_items}\n"
-        f"Jumlah belanja: RM {round(total_amount,2)}"
-    )
-    user_sessions.pop(user_id, None)
-    return ConversationHandler.END
+    if append_to_sheet(row):
+        await update.message.reply_text(
+            f"Resit diterima dan direkodkan.\nTarikh: {date_str}\nKedai: {shop}\nJumlah: RM{total_amount:.2f}"
+        )
+    else:
+        await update.message.reply_text("Gagal simpan data ke Google Sheets.")
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_sessions.pop(update.effective_user.id, None)
-    await update.message.reply_text("Perbualan dibatalkan. Sila mula semula bila-bila masa dengan /start.")
-    return ConversationHandler.END
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text
 
-# --- Setup Conversation Handler ---
-conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    states={
-        ASK_LOCATION: [MessageHandler(filters.TEXT & (~filters.COMMAND), ask_location)],
-        ASK_MORE_ITEMS: [MessageHandler(filters.TEXT & (~filters.COMMAND), ask_more_items)],
-        ASK_UPLOAD_IMAGE: [
-            MessageHandler(filters.PHOTO, save_receipt_image),
-            MessageHandler(filters.TEXT & (~filters.COMMAND), ask_upload_image)
-        ],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-    allow_reentry=True,
-)
-
-application = Application.builder().token(BOT1_TOKEN).build()
-application.add_handler(conv_handler)
-
-# --- Flask webhook route ---
-@app.route(f"/{BOT1_TOKEN}", methods=["POST"])
-def webhook():
+    # Assume user hantar text in format:
+    # Tarikh, Masa, Kedai, Senarai item; Jumlah item; Jumlah harga
+    # Contoh: 2025-05-17, 10:30, Kedai ABC, Nasi Lemak 2 RM6.00; 2; 6.00
     try:
-        data = request.get_json(force=True)
-        logger.info(f"Update received: {data}")
-        update = Update.de_json(data, bot)
-        asyncio.run(application.process_update(update))
-        return "OK"
-    except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return "Error", 500
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) < 4:
+            raise ValueError("Format salah, perlukan sekurang-kurangnya 4 bahagian")
+        date_str = parts[0]
+        time_str = parts[1]
+        shop = parts[2]
+        rest = ",".join(parts[3:])
+        # Pisahkan items dan total
+        if ";" in rest:
+            items_part, total_items_str, total_amount_str = [x.strip() for x in rest.split(";")]
+        else:
+            items_part = rest
+            total_items_str = "0"
+            total_amount_str = "0"
 
-@app.route("/")
-def index():
-    return "LaporBelanjaBot running!"
+        row = [
+            date_str,
+            time_str,
+            shop,
+            items_part,
+            total_items_str,
+            total_amount_str,
+            str(chat_id),
+        ]
+        if append_to_sheet(row):
+            await update.message.reply_text("Data belanja diterima dan direkodkan.")
+        else:
+            await update.message.reply_text("Gagal simpan data ke Google Sheets.")
+    except Exception as e:
+        logger.error(f"Error parsing text input: {e}")
+        await update.message.reply_text(
+            "Format teks salah. Sila hantar dalam format:\n"
+            "Tarikh, Masa, Kedai, Senarai item; Jumlah item; Jumlah harga\n"
+            "Contoh:\n2025-05-17, 10:30, Kedai ABC, Nasi Lemak 2 RM6.00; 2; 6.00"
+        )
+
+@app.route(f"/{TOKEN_BOT1}", methods=["POST"])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), bot)
+        application.update_queue.put(update)
+        return "OK"
+    else:
+        abort(405)
+
+# --- Main ---
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    application = ApplicationBuilder().token(TOKEN_BOT1).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Set webhook with Telegram API
+    # You must set your public URL + /TOKEN_BOT1 as webhook URL after deploy, example:
+    # https://yourdomain.com/<TOKEN_BOT1>
+
+    # Run Flask app on port 5000 (Render default)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
