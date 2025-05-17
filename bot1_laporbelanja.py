@@ -254,7 +254,8 @@ def index():
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
+    # Guna put_nowait() untuk masukkan update ke queue tanpa await
+    application.update_queue.put_nowait(update)
     return "OK"
 
 if __name__ == "__main__":
