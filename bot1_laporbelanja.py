@@ -10,7 +10,6 @@ from googleapiclient.discovery import build
 import pytesseract
 from PIL import Image
 
-# Ambil token bot dari environment variable
 TOKEN_BOT1 = os.getenv("BOT1_TOKEN")
 if not TOKEN_BOT1:
     raise RuntimeError("Missing BOT1_TOKEN environment variable!")
@@ -23,7 +22,6 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 if not GOOGLE_CREDENTIALS_JSON:
     raise RuntimeError("Missing GOOGLE_CREDENTIALS_JSON environment variable!")
 
-# Decode JSON credentials dari env
 credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
 credentials = Credentials.from_service_account_info(credentials_info)
 sheets_service = build('sheets', 'v4', credentials=credentials)
@@ -70,7 +68,6 @@ def parse_expense_text(text):
         line = line.strip()
         if not line:
             continue
-        # Date detection yyyy-mm-dd or dd/mm/yyyy
         if not date_str:
             try:
                 date_obj = datetime.datetime.strptime(line, "%Y-%m-%d")
@@ -84,15 +81,12 @@ def parse_expense_text(text):
                 continue
             except Exception:
                 pass
-        # Time detection hh:mm
         if not time_str and ":" in line and len(line) <= 5:
             time_str = line
             continue
-        # Shop name (first non-date/time with letters)
         if not shop and any(c.isalpha() for c in line):
             shop = line
             continue
-        # Item lines with RM amount
         if "rm" in line.lower():
             parts = line.lower().split("rm")
             try:
@@ -123,7 +117,6 @@ def append_to_sheet(row_data):
         logger.error(f"Failed append to sheet: {e}")
         return False
 
-# Telegram handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -219,12 +212,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Contoh:\n2025-05-17, 10:30, Kedai ABC, Nasi Lemak 2 RM6.00; 2; 6.00"
         )
 
-# Webhook route must be async
+# --- WEBHOOK route (sync, tidak async) ---
 @app.route(f"/{TOKEN_BOT1}", methods=["POST"])
-async def webhook():
+def webhook():
     if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), bot)
-        await application.update_queue.put(update)
+        update_json = request.get_json(force=True)
+        update = Update.de_json(update_json, bot)
+        application.process_update(update)  # Sync process update
         return "OK"
     else:
         abort(405)
@@ -236,5 +230,4 @@ if __name__ == "__main__":
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Jalankan Flask app
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
