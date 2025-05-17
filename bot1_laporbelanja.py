@@ -140,11 +140,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Maaf, saya tidak dapat semak status anda sekarang."
         )
 
-# Gabungkan handle_choice + handle_manual_input dalam satu handler
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     if context.user_data.get("expecting_manual_input"):
-        # Manual input
         parsed = parse_flexible_input(update.message.text)
         if not parsed:
             await update.message.reply_text(
@@ -174,7 +172,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["expecting_manual_input"] = False
     else:
-        # Pilihan menu utama
         if "taip belanja" in text:
             await update.message.reply_text(
                 "Sila taip maklumat belanja anda mengandungi:\n\n"
@@ -222,38 +219,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    nama_menu = "Resit Gambar"
-    row = [str(update.effective_chat.id), now_str, tarikh, nama_menu, f"{jumlah:.2f}", "Gambar Resit"]
+    row = [str(update.effective_chat.id), now_str, tarikh, "Resit (OCR)", f"{jumlah:.2f}", "Photo"]
     append_to_sheet(row)
 
     await update.message.reply_text(
-        f"✅ Resit anda telah berjaya direkodkan!\n"
+        f"✅ Resit telah direkodkan.\n"
         f"🗓 Tarikh: {tarikh}\n"
         f"💰 Jumlah: RM {jumlah:.2f}\n\n"
-        "Terima kasih kerana menggunakan bot ini.\n"
-        "Taip /status untuk semak jumlah belanja anda."
+        "Terima kasih! Taip /status untuk semak jumlah belanja anda."
     )
 
-# Setup handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("ping", ping_command))
-application.add_handler(CommandHandler("status", status_command))
-application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+@app.route("/webhook/<token>", methods=["POST"])
+async def webhook(token):
+    if token != BOT_TOKEN:
+        abort(403)
+    update_data = request.get_json(force=True)
+    update = Update.de_json(update_data, application.bot)
+    await application.update_queue.put(update)
+    return "OK"
 
-# Flask webhook route (async)
-@app.route("/webhook", methods=["POST"])
-async def webhook():
-    if request.method == "POST":
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, application.bot)
-        await application.update_queue.put(update)
-        return "OK"
-    else:
-        abort(405)
+def main():
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("ping", ping_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Run Flask app on port 5000
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    main()
