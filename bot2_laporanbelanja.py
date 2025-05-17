@@ -1,150 +1,96 @@
 import os
 import logging
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime, timedelta
 import base64
 import json
+import asyncio
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- Config ---
+BOT2_TOKEN = os.getenv("BOT2_TOKEN")
+SHEET_ID = os.getenv("SHEET_ID")
+GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+
+# --- Setup logging ---
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT2_TOKEN = os.environ.get("BOT2_TOKEN")
-SHEET_ID = os.environ.get("SHEET_ID")
-GOOGLE_CREDENTIALS_BASE64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+# --- Setup Google Sheets ---
+credentials_json = json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64))
+credentials = Credentials.from_service_account_info(credentials_json)
+gc = gspread.authorize(credentials)
+sheet = gc.open_by_key(SHEET_ID).sheet1
 
-if not all([BOT2_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS_BASE64]):
-    raise Exception("Sila setkan environment variables: BOT2_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS_BASE64")
-
-credentials_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-credentials_dict = json.loads(credentials_json)
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
-gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SHEET_ID).sheet1  # Assuming first sheet
-
+# --- Setup Telegram Bot & Flask app ---
 app = Flask(__name__)
-bot = Bot(token=BOT2_TOKEN)
+bot = Bot(BOT2_TOKEN)
+application = ApplicationBuilder().token(BOT2_TOKEN).build()
 
-# Function to parse Google Sheet data to dict with user_id key
-# We assume user_id is in a new column, otherwise will parse by username or chat_id stored in sheet by bot1
-# For simplicity, here we assume user_id is stored in last column of each row (you must modify bot1 to save it)
-# If not, just parse all and send combined report to all users who messaged bot2
+# --- Helper function to parse and sum data from sheet ---
+def get_user_expenses(user_id: int, days_back: int):
+    """Ambil jumlah perbelanjaan user_id dalam tempoh days_back hari."""
+    records = sheet.get_all_records()
+    total = 0.0
+    cutoff = datetime.now() - timedelta(days=days_back)
 
-def get_expenses():
-    data = sheet.get_all_values()
-    # header: Date, Time, Location, Items, Total Items, Total Amount, UserID (added in bot1)
-    headers = data[0]
-    rows = data[1:]
-    expenses = []
-    for row in rows:
+    for row in records:
         try:
-            d = {
-                "date": row[0],
-                "time": row[1],
-                "location": row[2],
-                "items": row[3],
-                "total_items": int(row[4]),
-                "total_amount": float(row[5]),
-                "user_id": int(row[6]) if len(row) > 6 else None
-            }
-            expenses.append(d)
-        except Exception as e:
-            logger.error(f"Error parsing row {row}: {e}")
-    return expenses
+            row_user_id = int(row['user_id'])
+            dt = datetime.strptime(row['datetime'], "%Y-%m-%d %H:%M:%S")
+            amount = float(row['amount']) if 'amount' in row else 0
+            if row_user_id == user_id and dt >= cutoff:
+                total += amount
+        except Exception:
+            pass
+    return total
 
-def filter_expenses_by_user_and_period(expenses, user_id, start_date, end_date):
-    filtered = []
-    for e in expenses:
-        if e['user_id'] != user_id:
-            continue
-        try:
-            dt = datetime.strptime(e['date'], "%Y-%m-%d")
-            if start_date <= dt <= end_date:
-                filtered.append(e)
-        except:
-            continue
-    return filtered
-
-def format_report(expenses, period_name):
-    if not expenses:
-        return f"Tiada rekod belanja untuk {period_name}."
-    total_amount = sum(e['total_amount'] for e in expenses)
-    total_items = sum(e['total_items'] for e in expenses)
-    locations = set(e['location'] for e in expenses)
-    report_lines = [
-        f"Laporan belanja untuk {period_name}:",
-        f"Jumlah transaksi: {len(expenses)}",
-        f"Jumlah item: {total_items}",
-        f"Jumlah perbelanjaan: RM{total_amount:.2f}",
-        f"Lokasi kedai: {', '.join(locations)}",
-        "\nDetail transaksi:",
-    ]
-    for e in expenses:
-        report_lines.append(f"{e['date']} - {e['location']} - RM{e['total_amount']:.2f} ({e['items']})")
-    return "\n".join(report_lines)
+# --- Bot commands ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "Selamat datang ke *LaporanBelanjaBot*!\n\n"
-        "Gunakan /laporan untuk dapatkan ringkasan belanja mingguan dan bulanan anda.\n"
-        "Bot ini akan mengira berdasarkan data yang anda rekod melalui LaporBelanjaBot.\n"
-        "Jika ada sebarang masalah, sila hubungi pentadbir."
+    msg = (
+        "Selamat datang ke LaporanBelanjaBot!\n\n"
+        "Gunakan command:\n"
+        "/mingguan - untuk laporan belanja seminggu\n"
+        "/bulanan - untuk laporan belanja sebulan\n"
     )
-    await update.message.reply_markdown(text)
+    await update.message.reply_text(msg)
 
-async def laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def mingguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    expenses = get_expenses()
+    total = get_user_expenses(user_id, 7)
+    await update.message.reply_text(f"Jumlah belanja anda dalam 7 hari terakhir: RM{total:.2f}")
 
-    today = datetime.today()
-    # Mingguan (7 hari lalu)
-    start_week = today - timedelta(days=7)
-    weekly_expenses = filter_expenses_by_user_and_period(expenses, user_id, start_week, today)
+async def bulanan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    total = get_user_expenses(user_id, 30)
+    await update.message.reply_text(f"Jumlah belanja anda dalam 30 hari terakhir: RM{total:.2f}")
 
-    # Bulanan (1 bulan lalu)
-    start_month = today - timedelta(days=30)
-    monthly_expenses = filter_expenses_by_user_and_period(expenses, user_id, start_month, today)
-
-    weekly_report = format_report(weekly_expenses, "7 hari lepas")
-    monthly_report = format_report(monthly_expenses, "30 hari lepas")
-
-    await update.message.reply_text(weekly_report)
-    await update.message.reply_text(monthly_report)
-
-@app.route(f'/{BOT2_TOKEN}', methods=['POST'])
+# Flask route untuk webhook
+@app.route(f"/{BOT2_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    application = app.telegram_app
-    application.update_queue.put(update)
-    return jsonify({"status": "ok"})
+    asyncio.create_task(application.update_queue.put(update))
+    return "OK"
 
-async def set_webhook():
-    url = os.environ.get("WEBHOOK_URL")
-    if not url:
-        logger.error("WEBHOOK_URL environment variable belum set")
-        return
-    webhook_url = f"{url}/{BOT2_TOKEN}"
-    await bot.set_webhook(webhook_url)
-    logger.info(f"Webhook set to {webhook_url}")
+# Route root untuk cek server hidup
+@app.route("/")
+def index():
+    return "LaporanBelanjaBot is running"
 
-def main():
-    application = ApplicationBuilder().token(BOT2_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("laporan", laporan))
-
-    app.telegram_app = application
-
-    import asyncio
-    asyncio.run(set_webhook())
-
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10001)))
+# Add handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("mingguan", mingguan))
+application.add_handler(CommandHandler("bulanan", bulanan))
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", "10001"))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT2_TOKEN,
+        webhook_url=f"https://YOUR_DOMAIN_OR_RENDER_URL/{BOT2_TOKEN}"
+    )
