@@ -9,3 +9,4 @@ Flask==2.2.5
 apscheduler==3.10.4
 python-dotenv
 requests
+pyTelegramBotAPI
