@@ -10,3 +10,4 @@ python-dotenv==1.0.1
 pytesseract==0.3.10
 python-telegram-bot[webhooks]==20.7
 aiohttp
+apscheduler
