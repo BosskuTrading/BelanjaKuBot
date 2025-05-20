@@ -10,144 +10,137 @@ from sheets_utils import save_expense_to_sheet
 from ocr_utils import extract_text_from_image
 from helper import parse_expense_text, get_now_string
 
-# ─── Muat tetapan dari .env ───────────────────────
 load_dotenv()
-TOKEN       = os.getenv("BOT1_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")      # e.g. https://laporbelanjabot.onrender.com
-PORT        = int(os.getenv("PORT", "8443"))
-
-if not TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT1_TOKEN dan WEBHOOK_URL mesti ditetapkan di Environment")
+TOKEN = os.getenv("BOT1_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", "8443"))
 
 logging.basicConfig(level=logging.INFO)
 
-# ─── Status perbualan ─────────────────────────────
 CHOOSING_MODE, TYPING_EXPENSE, WAITING_RECEIPT = range(3)
 
-# ─── Keyboard menu ────────────────────────────────
-keyboard = ReplyKeyboardMarkup(
+main_menu = ReplyKeyboardMarkup(
     [[KeyboardButton("Taip Maklumat Belanja")],
      [KeyboardButton("Hantar Gambar Resit")]],
     resize_keyboard=True, one_time_keyboard=True
 )
 
-# ─── Mesej sambutan & panduan ─────────────────────
 WELCOME_MSG = (
-    "👋 Hai! Saya *LaporBelanjaBot* – pembantu kewangan anda.\n\n"
-    "*Apa saya boleh bantu?*\n"
-    "1️⃣ Simpan belanja harian (taip atau resit)\n"
-    "2️⃣ Rekod ke Google Sheets\n"
-    "3️⃣ Laporan automatik via *LaporanBelanjaBot*\n\n"
-    "*Cara guna:*\n"
-    "• Tekan *Taip Maklumat Belanja*\n"
-    "  Contoh: `Nasi Lemak, Warung Ali, RM5.00`\n"
-    "• Tekan *Hantar Gambar Resit*\n"
-    "  Ambil gambar resit & hantar di sini\n\n"
-    "Taip `/cancel` untuk batal, `/status` untuk semak bot online."
+    "👋 Hai! Saya *LaporBelanjaBot*, pembantu belanja harian anda.\n\n"
+    "Anda boleh:\n"
+    "📌 *Taip belanja* (contoh: `Nasi Lemak, Warung Ali, RM5.00`)\n"
+    "📷 *Hantar gambar resit* (saya baca & simpan)\n\n"
+    "Taip /cancel untuk berhenti, /status untuk semak bot aktif."
 )
 
-# ─── Handler /start ───────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        WELCOME_MSG, reply_markup=keyboard, parse_mode="Markdown"
-    )
+    await update.message.reply_text(WELCOME_MSG, reply_markup=main_menu, parse_mode="Markdown")
     return CHOOSING_MODE
 
-# ─── Handler pilihan menu ─────────────────────────
 async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "Taip Maklumat Belanja":
         await update.message.reply_text(
-            "✅ Sila taip dalam format:\n"
-            "`Item, Tempat, RM jumlah`\n"
-            "Contoh: `Teh Tarik, Kafe Mamak, RM2.50`",
+            "📝 Okey, sila taip perbelanjaan anda.\n"
+            "Contoh: `Teh Tarik, Kedai Ali, RM2.50`",
             parse_mode="Markdown"
         )
         return TYPING_EXPENSE
-    if text == "Hantar Gambar Resit":
-        await update.message.reply_text("✅ Sila hantar gambar resit anda sekarang.")
+    elif text == "Hantar Gambar Resit":
+        await update.message.reply_text("📷 Sila hantar gambar resit anda.")
         return WAITING_RECEIPT
-    await update.message.reply_text("❓ Sila pilih dari menu yang diberi.")
-    return CHOOSING_MODE
+    else:
+        await update.message.reply_text("❓ Sila pilih dari menu ya.", reply_markup=main_menu)
+        return CHOOSING_MODE
 
-# ─── Handler teks belanja ──────────────────────────
 async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.lower() == "/cancel":
         return await cancel(update, context)
 
-    user    = update.effective_user
+    user = update.effective_user
     chat_id = update.effective_chat.id
-    data    = parse_expense_text(text)
+    data = parse_expense_text(text)
 
     if not data:
-        await update.message.reply_text(
-            "⚠️ Format salah. Gunakan:\n"
-            "`Item, Tempat, RM jumlah`\n"
-            "Contoh: `Roti Canai, Restoran XYZ, RM1.80`",
-            parse_mode="Markdown"
-        )
+        # Cuba bantu auto-cadangkan jika user taip tanpa koma
+        words = text.replace("RM", " RM").split()
+        rm_index = next((i for i, w in enumerate(words) if w.startswith("RM")), -1)
+        if rm_index >= 2:
+            item = " ".join(words[:rm_index - 1])
+            tempat = words[rm_index - 1]
+            jumlah = words[rm_index]
+            cadangan = f"{item}, {tempat}, {jumlah}"
+            await update.message.reply_text(
+                f"⚠️ Format nampak macam salah...\n\n"
+                f"Adakah anda maksudkan:\n`{cadangan}`?\n\n"
+                f"Cuba taip semula ikut format: `Item, Tempat, RM jumlah`\n"
+                f"Contoh: `Roti Canai, Kafe ABC, RM3.00`",
+                parse_mode="Markdown",
+                reply_markup=main_menu
+            )
+        else:
+            await update.message.reply_text(
+                "😅 Saya tak dapat baca ayat tu...\n\n"
+                "Sila guna format mudah:\n`Item, Tempat, RM jumlah`\n"
+                "Contoh: `Kopi O, Gerai Makcik, RM1.50`",
+                parse_mode="Markdown",
+                reply_markup=main_menu
+            )
         return TYPING_EXPENSE
 
     data.update({
         "timestamp": get_now_string(),
-        "from":      user.full_name,
-        "chat_id":   chat_id
+        "from": user.full_name,
+        "chat_id": chat_id
     })
     save_expense_to_sheet(data)
 
     await update.message.reply_text(
-        "✅ Terima kasih! Belanja anda telah direkod.\n"
-        "Taip `/start` untuk rekod lain."
+        f"✅ Berjaya simpan!\n\n"
+        f"🍽 {data['item']}\n📍 {data['location']}\n💸 {data['amount']}",
+        reply_markup=main_menu
     )
     return ConversationHandler.END
 
-# ─── Handler gambar resit ─────────────────────────
 async def received_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
+    user = update.effective_user
     chat_id = update.effective_chat.id
 
-    photo      = update.message.photo[-1]
-    photo_file = await photo.get_file()
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
     os.makedirs("receipts", exist_ok=True)
-    file_path  = f"receipts/{photo.file_id}.jpg"
-    await photo_file.download_to_drive(file_path)
+    file_path = f"receipts/{photo.file_id}.jpg"
+    await file.download_to_drive(file_path)
 
     text = extract_text_from_image(file_path)
     data = parse_expense_text(text) or {}
     data.update({
-        "timestamp":  get_now_string(),
-        "from":       user.full_name,
-        "chat_id":    chat_id,
+        "timestamp": get_now_string(),
+        "from": user.full_name,
+        "chat_id": chat_id,
         "image_path": file_path
     })
     save_expense_to_sheet(data)
 
-    await update.message.reply_text("✅ Gambar resit diterima dan disimpan.")
+    await update.message.reply_text("✅ Gambar resit diterima dan telah direkod.", reply_markup=main_menu)
     return ConversationHandler.END
 
-# ─── Handler /cancel ──────────────────────────────
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Operasi dibatalkan. Taip `/start` semula.")
+    await update.message.reply_text("✅ Sesi dibatalkan. Taip /start untuk mula semula.")
     return ConversationHandler.END
 
-# ─── Handler /status ──────────────────────────────
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ *LaporBelanjaBot* sedang *ONLINE* dan sedia membantu anda.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("✅ Bot sedang ONLINE dan sedia membantu anda.")
 
-# ─── Program utama ───────────────────────────────
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CHOOSING_MODE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_mode)],
-            TYPING_EXPENSE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, received_text)],
-            WAITING_RECEIPT:  [MessageHandler(filters.PHOTO, received_photo)],
+            CHOOSING_MODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_mode)],
+            TYPING_EXPENSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_text)],
+            WAITING_RECEIPT: [MessageHandler(filters.PHOTO, received_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
