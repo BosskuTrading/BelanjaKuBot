@@ -1,35 +1,40 @@
 import re
 from datetime import datetime
 
-def get_now_string():
-    """Dapatkan tarikh dan masa semasa dalam format ISO."""
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
 def parse_expense_text(text):
     """
-    Cuba kenalpasti input teks belanja daripada pengguna.
-    Format yang disokong (tidak sensitif huruf besar):
-    Contoh: 'Nasi ayam, Warung Kak Nah, RM10.50'
+    Menyokong input gaya bebas seperti:
+    'RM5.00 teh ais warung ahmad'
+    'beli di Mydin sabun RM8.50'
+    'nasi lemak RM6.20 kafe Kak Yah'
     """
+
     try:
-        # Pecah ikut koma
-        parts = [p.strip() for p in text.split(',')]
-        if len(parts) < 3:
-            return None
-
-        item, location, price_raw = parts[0], parts[1], parts[2]
-
-        # Cari nilai RM
-        match = re.search(r'RM?\s?([\d.]+)', price_raw.upper())
+        match = re.search(r"RM\s?(\d+(?:\.\d{1,2})?)", text, re.IGNORECASE)
         if not match:
             return None
 
-        price = float(match.group(1))
+        amount = match.group(1)
+        # Pisahkan kepada kiri dan kanan jumlah
+        parts = text.replace("RM", "").split(match.group(1))
+        before = parts[0].strip()
+        after = parts[1].strip() if len(parts) > 1 else ""
+
+        # Heuristik: kiri = barang, kanan = lokasi
+        item = before or "Barang"
+        location = after or "Tempat"
 
         return {
-            'item': item,
-            'location': location,
-            'amount': price,
+            "item": item.title(),
+            "location": location.title(),
+            "amount": amount
         }
-    except Exception:
+    except Exception as e:
+        print(f"[Parse Error]: {e}")
         return None
+
+def get_now_string():
+    """
+    Dapatkan waktu semasa sebagai string standard.
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

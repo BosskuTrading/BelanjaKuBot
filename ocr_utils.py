@@ -1,19 +1,24 @@
-import pytesseract
-from PIL import Image
+import easyocr
 
-# (Optional) Set path if Tesseract is not in PATH
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Inisialisasi hanya sekali
+reader = easyocr.Reader(['en'])
 
 def extract_text_from_image(image_path):
     """
-    Guna Tesseract OCR untuk baca teks daripada gambar resit.
-    Input: image_path (str)
-    Output: text (str)
+    Guna EasyOCR untuk ekstrak teks dari imej.
+    Jika gagal, pulang mesej fallback.
     """
     try:
-        img = Image.open(image_path)
-        text = pytesseract.image_to_string(img)
-        return text
+        result = reader.readtext(image_path, detail=0)
+        text = " ".join(result).strip()
+
+        if text:
+            print(f"✅ OCR berjaya [{image_path}]: {text}")
+            return text
+        else:
+            print(f"⚠️ OCR tidak jumpa teks dalam {image_path}")
+            return "[Resit dihantar tetapi tiada teks berjaya dikenalpasti.]"
+
     except Exception as e:
-        print(f"OCR Error: {e}")
-        return ""
+        print(f"❌ OCR Error di {image_path}: {e}")
+        return "[Ralat semasa baca gambar resit. Sila cuba taip secara manual.]"
