@@ -8,3 +8,5 @@ easyocr==1.7.1
 numpy==1.26.4
 python-dotenv==1.0.1
 pytesseract==0.3.10
+python-telegram-bot[webhooks]==20.7
+aiohttp
