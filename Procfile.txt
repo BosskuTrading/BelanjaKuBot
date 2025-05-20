@@ -1,1 +1,2 @@
 web: python bot1_laporbelanja.py
+web: python bot2_laporanbelanja.py
