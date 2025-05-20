@@ -2,8 +2,8 @@ import os
 import logging
 import threading
 from flask import Flask
-from telegram import Bot
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from sheets_utils import get_all_users, get_user_expenses
@@ -12,20 +12,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # ─── Muat .env ──────────────────────
 load_dotenv()
 TOKEN       = os.getenv("BOT2_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT        = int(os.getenv("PORT", "8443"))
+PORT        = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 
-# ─── Flask App untuk Render detect port ─────
+# ─── Flask App ──────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def index():
-    return "LaporanBelanjaBot aktif."
+    return "LaporanBelanjaBot sedang berjalan."
 
-# ─── Fungsi laporan ─────────────────────────
+# ─── Kirakan jumlah belanja ─────────
 def kira(records, period):
     total = 0.0
     now = datetime.now()
@@ -47,6 +46,7 @@ def kira(records, period):
 
     return label, total
 
+# ─── Hantar laporan ke semua pengguna ──────────
 def hantar_laporan():
     logging.info("LaporanBelanjaBot: Mulakan penghantaran laporan kepada semua pengguna...")
     users = get_all_users()
@@ -68,25 +68,28 @@ def hantar_laporan():
         except Exception as e:
             logging.error(f"Gagal hantar ke {cid}: {e}")
 
-# ─── Run Flask secara selari ────────────────
+# ─── Flask runner ──────────────────────────────
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
-# ─── Main PTB Bot + Scheduler ───────────────
-def main():
-    # Mula Flask dalam thread berasingan
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.start()
+# ─── Placeholder untuk command start ───────────
+async def kosong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Bot sedang aktif. Tiada fungsi khas di sini.")
 
-    # Setup scheduler harian
+# ─── Main ──────────────────────────────────────
+def main():
+    # Mula Flask di thread lain
+    threading.Thread(target=run_flask).start()
+
+    # Jadual laporan harian
     scheduler = BackgroundScheduler()
     scheduler.add_job(hantar_laporan, 'cron', hour=8, minute=0)
     scheduler.start()
 
-    # Placeholder app untuk webhook compatibility (jika mahu)
+    # Run bot polling
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: None))
-    app.run_polling()  # Guna polling untuk kekalkan struktur
+    app.add_handler(CommandHandler("start", kosong))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
