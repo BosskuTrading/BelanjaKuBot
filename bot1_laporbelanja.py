@@ -12,7 +12,6 @@ from helper import parse_expense_text, get_now_string
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN_BOT1")
-
 logging.basicConfig(level=logging.INFO)
 
 # Conversation states
@@ -26,25 +25,14 @@ keyboard = ReplyKeyboardMarkup(
 
 WELCOME_MSG = (
     "Hai! Saya *LaporBelanjaBot*, pembantu kewangan peribadi anda. "
-    "Bot ini dibawakan khas oleh *Fadirul Ezwan*.\n\n"
-    "Dengan bot ini, anda boleh _**rekod semua perbelanjaan harian, mingguan dan bulanan anda**_. "
-    "Semua data akan disimpan ke Google Sheet dan akan dihantar melalui *LaporanBelanjaBot*.\n\n"
-    "Cara menggunakan bot:\n"
-    "────────────────────────\n"
-    "*1. Taip Maklumat Belanja (Manual)*\n"
-    "Contoh:\n"
-    "▫️ *Nasi Ayam, Warung Kak Nah, RM8.50*\n"
-    "▫️ *Minyak kereta, Shell Kg Baru, RM90*\n"
-    "▫️ *Barang dapur, Mydin, RM132.70*\n\n"
-    "Jika anda tidak tulis tarikh, sistem akan ambil tarikh & masa sekarang secara automatik.\n\n"
-    "*2. Hantar Gambar Resit (OCR)*\n"
-    "Ambil gambar resit pembelian anda dan terus hantar di sini.\n"
-    "Bot akan cuba baca & rekod maklumat dari gambar.\n\n"
-    "──────────────\n"
-    "*Arahan Tambahan:*\n"
-    "🔸 Taip */cancel* untuk hentikan sesi.\n"
-    "🔸 Taip */status* untuk semak sama ada bot sedang online.\n\n"
-    "Sila pilih salah satu cara untuk mula:"
+    "Bot ini dibawakan oleh *Fadirul Ezwan*.\n\n"
+    "Dengan saya, anda boleh rekod perbelanjaan & gambar resit, dan saya akan simpan semuanya.\n"
+    "Laporan perbelanjaan anda akan dihantar oleh *LaporanBelanjaBot* secara automatik.\n\n"
+    "*Cara guna:*"
+    "\n1. Tekan 'Taip Maklumat Belanja' dan masukkan contoh: `Nasi Lemak, Restoran Ali, RM8.00`"
+    "\n2. Atau tekan 'Hantar Gambar Resit' untuk ambil gambar pembelian.\n\n"
+    "Saya akan simpan semuanya di Google Sheet dan bantu anda buat laporan mingguan & bulanan.\n\n"
+    "Sila pilih cara untuk mulakan:"
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,7 +43,7 @@ async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "Taip Maklumat Belanja":
-        await update.message.reply_text("Sila taip maklumat belanja anda (contoh: Nasi Lemak, Warung Kak Yah, RM7.50)")
+        await update.message.reply_text("Sila taip maklumat belanja anda (contoh: Nasi Lemak, Restoran Ali, RM8.50)")
         return TYPING_EXPENSE
 
     elif text == "Hantar Gambar Resit":
@@ -68,6 +56,9 @@ async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
     if "/cancel" in text:
         return await cancel(update, context)
 
@@ -81,24 +72,29 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return TYPING_EXPENSE
 
     data['timestamp'] = data.get('timestamp') or get_now_string()
-    data['from'] = update.effective_user.full_name
+    data['from'] = user.full_name
+    data['chat_id'] = chat_id
     save_expense_to_sheet(data)
 
     await update.message.reply_text("Terima kasih! Maklumat belanja anda telah direkod.")
     return ConversationHandler.END
 
 async def received_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
     photo = update.message.photo[-1]
     photo_file = await photo.get_file()
-    file_path = f"receipts/{photo.file_id}.jpg"
     os.makedirs("receipts", exist_ok=True)
+    file_path = f"receipts/{photo.file_id}.jpg"
     await photo_file.download_to_drive(file_path)
 
     text = extract_text_from_image(file_path)
     data = parse_expense_text(text)
     if data:
-        data['timestamp'] = data.get('timestamp') or get_now_string()
-        data['from'] = update.effective_user.full_name
+        data['timestamp'] = get_now_string()
+        data['from'] = user.full_name
+        data['chat_id'] = chat_id
         data['image_path'] = file_path
         save_expense_to_sheet(data)
         await update.message.reply_text("Resit berjaya dibaca dan direkod. Terima kasih!")
@@ -113,8 +109,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "✅ *Bot ini (LaporBelanjaBot)* sedang ONLINE dan bersedia membantu anda merekod belanja.\n\n"
-        "🧾 Laporan perbelanjaan harian, mingguan dan bulanan akan dihantar secara automatik oleh bot bernama *LaporanBelanjaBot*.",
+        "✅ *Bot ini (LaporBelanjaBot)* sedang ONLINE dan sedia membantu.\n\n"
+        "Maklumat belanja anda akan direkod dan laporan akan dihantar oleh *LaporanBelanjaBot*.",
         parse_mode="Markdown"
     )
 
