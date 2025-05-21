@@ -31,7 +31,7 @@ def get_or_create(name):
     except:
         ws = sheet.add_worksheet(title=name, rows="100", cols="20")
         if name == SHEET_BELANJA:
-            ws.append_row(["Tarikh", "Item", "Tempat", "Jumlah (RM)", "Dari (Nama)", "Chat ID"])
+            ws.append_row(["Tarikh", "Nama", "Item", "Lokasi", "Jumlah (RM)", "Gambar", "ChatID"])
         elif name == SHEET_PENGGUNA:
             ws.append_row(["Nama", "ChatID"])
         return ws
@@ -39,16 +39,15 @@ def get_or_create(name):
 def save_expense_to_sheet(data):
     sheet = get_or_create(SHEET_BELANJA)
     sheet.append_row([
-        data["timestamp"],
-        data["item"],
-        data["location"],
-        data["amount"],
-        data["from"],
-        data["chat_id"]
+        data["timestamp"],               # Tarikh
+        data["from"],                    # Nama
+        data["item"],                    # Item
+        data["location"],                # Lokasi
+        data["amount"],                 # Jumlah (RM)
+        data.get("image_path", ""),     # Gambar (jika ada)
+        data["chat_id"]                  # Chat ID
     ])
-    print("✅ Disimpan ke Google Sheet:", data)  # Log ini akan muncul di Render log
-
-    # Juga log pengguna
+    print("✅ Data disimpan ke Google Sheet:", data)
     save_user_info(data["from"], data["chat_id"])
 
 def save_user_info(name, chat_id):
@@ -57,3 +56,15 @@ def save_user_info(name, chat_id):
     if str(chat_id) not in existing:
         sheet.append_row([name, str(chat_id)])
         print(f"👤 Pengguna baru direkod: {name} ({chat_id})")
+
+def get_all_users():
+    sheet = get_or_create(SHEET_PENGGUNA)
+    users = sheet.get_all_records()
+    return users
+
+def get_user_expenses(chat_id):
+    sheet = get_or_create(SHEET_BELANJA)
+    all_records = sheet.get_all_records()
+    filtered = [r for r in all_records if str(r.get("ChatID")) == str(chat_id)]
+    return filtered
+
