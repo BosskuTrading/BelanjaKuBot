@@ -1,5 +1,7 @@
 import os
 import logging
+import re
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters,
@@ -8,9 +10,8 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from sheets_utils import save_expense_to_sheet
 from ocr_utils import extract_text_from_image
-from datetime import datetime
-import re
 
+# ── Konfigurasi token dan webhook ─────────────
 load_dotenv()
 TOKEN = os.getenv("BOT1_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -18,8 +19,10 @@ PORT = int(os.getenv("PORT", "8443"))
 
 logging.basicConfig(level=logging.INFO)
 
+# ── Status perbualan ─────────────
 CHOOSING_MODE, TYPING_EXPENSE, WAITING_RECEIPT = range(3)
 
+# ── Tetapan papan kekunci ────────
 main_menu = ReplyKeyboardMarkup(
     [[KeyboardButton("Taip Maklumat Belanja")],
      [KeyboardButton("Hantar Gambar Resit")]],
@@ -32,6 +35,7 @@ retry_menu = ReplyKeyboardMarkup(
     resize_keyboard=True, one_time_keyboard=True
 )
 
+# ── Fungsi bantu ──────────────────
 def parse_expense_text(text):
     try:
         match = re.search(r"RM\s?(\d+(?:\.\d{1,2})?)", text, re.IGNORECASE)
@@ -49,20 +53,23 @@ def parse_expense_text(text):
             "amount": amount
         }
     except Exception as e:
-        print(f"Parse Error: {e}")
+        print(f"[Parse Error]: {e}")
         return None
 
 def get_now_string():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+# ── Mesej permulaan ───────────────
 WELCOME_MSG = (
-    "👋 Hai! Saya *LaporBelanjaBot*, pembantu belanja harian anda.\n\n"
+    "👋 Hai! Saya *LaporBelanjaBot*, pembantu rekod belanja anda.\n\n"
     "Anda boleh:\n"
-    "📌 *Taip belanja* — tak kisah ikut susunan mana pun!\n"
-    "📷 *Hantar gambar resit* — saya cuba baca & simpan\n\n"
-    "Taip /cancel untuk berhenti, /status untuk semak bot aktif."
+    "📌 Taip sendiri — `RM5 nasi lemak warung ali`\n"
+    "📷 Hantar gambar resit — saya akan cuba baca & simpan\n\n"
+    "Taip /cancel untuk berhenti bila-bila masa.\n"
+    "Jom mula, pilih cara di bawah:"
 )
 
+# ── Fungsi bot ────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_MSG, reply_markup=main_menu, parse_mode="Markdown")
     return CHOOSING_MODE
@@ -70,10 +77,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if "Taip" in text:
-        await update.message.reply_text("📝 Sila taip belanja anda. Contoh:\n`RM5.20 Teh Ais Warung Haji`", parse_mode="Markdown")
+        await update.message.reply_text("📝 Sila taip belanja anda. Contoh:\n`RM3.50 Teh Tarik Kedai Ali`", parse_mode="Markdown")
         return TYPING_EXPENSE
     elif "Gambar" in text or "OCR" in text:
-        await update.message.reply_text("📷 Sila hantar gambar resit anda sekarang.")
+        await update.message.reply_text("📷 Sila hantar gambar resit anda.")
         return WAITING_RECEIPT
     else:
         await update.message.reply_text("❓ Sila pilih dari menu.", reply_markup=main_menu)
@@ -90,8 +97,12 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not data:
         await update.message.reply_text(
-            "😅 Saya tak pasti maklumat tu lengkap...\n"
-            "Cuba tulis contohnya: `RM8 Nasi Lemak Kafe Aisyah`",
+            "⚠️ Format tak lengkap atau tiada jumlah dengan 'RM'.\n\n"
+            "*Contoh yang betul:*\n"
+            "▫️ `RM5.20 Nasi Lemak Warung Haji`\n"
+            "▫️ `RM12 Sabun Dobi Giant`\n"
+            "▫️ `RM3.50 Teh O Ais gerai depan rumah`\n\n"
+            "Sila cuba semula ikut format di atas.",
             parse_mode="Markdown",
             reply_markup=main_menu
         )
@@ -105,7 +116,8 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_expense_to_sheet(data)
 
     await update.message.reply_text(
-        f"✅ Disimpan!\n🍽 {data['item']}\n📍 {data['location']}\n💸 RM{data['amount']}",
+        f"✅ Disimpan!\n🍽 {data['item']}\n📍 {data['location']}\n💸 RM{data['amount']}\n\n"
+        "Nak rekod belanja lain?",
         reply_markup=main_menu
     )
     return CHOOSING_MODE
@@ -139,8 +151,8 @@ async def received_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING_MODE
     else:
         await update.message.reply_text(
-            "😓 Saya tak dapat camkan maklumat dari gambar ni.\n"
-            "Nak cuba semula atau taip secara manual?",
+            "😓 Tak dapat baca resit ni dengan jelas.\n"
+            "Nak cuba lagi atau taip sendiri?",
             reply_markup=retry_menu
         )
         return CHOOSING_MODE
@@ -150,22 +162,17 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot sedang ONLINE dan bersedia membantu.")
+    await update.message.reply_text("✅ Bot sedang ONLINE dan sedia membantu.")
 
+# ── Main ──────────────────────────
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CHOOSING_MODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, choose_mode)
-            ],
-            TYPING_EXPENSE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, received_text)
-            ],
-            WAITING_RECEIPT: [
-                MessageHandler(filters.PHOTO, received_photo)
-            ],
+            CHOOSING_MODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_mode)],
+            TYPING_EXPENSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_text)],
+            WAITING_RECEIPT: [MessageHandler(filters.PHOTO, received_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
