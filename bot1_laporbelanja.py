@@ -24,22 +24,41 @@ main_menu = ReplyKeyboardMarkup(
 
 def parse_expense_text(text):
     try:
-        match = re.search(r"RM\s?(\d+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+        text = text.strip()
+        match = re.search(r"(rm|RM)\s?(\d+(?:\.\d{1,2})?)", text)
         if not match:
             return None
-        amount = match.group(1)
-        parts = text.replace("RM", "").split(match.group(1))
-        before = parts[0].strip()
-        after = parts[1].strip() if len(parts) > 1 else ""
-        item = before or "Barang"
-        location = after or "Tempat"
+
+        amount = match.group(2)
+        rm_start = match.start()
+        rm_end = match.end()
+
+        before = text[:rm_start].strip()
+        after = text[rm_end:].strip()
+
+        before_words = before.split()
+        after_words = after.split()
+
+        if not before_words and not after_words:
+            return None
+
+        if len(before_words) >= len(after_words):
+            item = before
+            location = after
+        else:
+            item = after
+            location = before
+
+        if not item or item.lower() in ["rm", ""]:
+            return None
+
         return {
             "item": item.title(),
-            "location": location.title(),
+            "location": location.title() if location else "-",
             "amount": amount
         }
     except Exception as e:
-        print(f"[Ralat Format]: {e}")
+        print(f"[Parse Error]: {e}")
         return None
 
 def get_now_string():
@@ -47,7 +66,17 @@ def get_now_string():
 
 WELCOME_MSG = (
     "👋 Hai! Saya *LaporBelanjaBot*, pembantu rekod belanja anda.\n\n"
-    "📌 Sila taip belanja anda. Contoh:\n`RM5 Nasi lemak warung ali`\n\n"
+    "Sila taip maklumat belanja dalam format berikut:\n"
+    "▫️ `RM10 Nasi lemak kedai Ali`\n"
+    "▫️ `Teh tarik RM2 gerai bawah flat`\n"
+    "▫️ `Sabun Dobi RM12`\n\n"
+    "*Wajib ada jumlah RM dan barang dibeli.*\n"
+    "Kedai/Tempat adalah pilihan.\n\n"
+    "📊 *Laporan Belanja Anda Akan Direkod:*\n"
+    "Setiap belanja yang anda rekod akan dihantar terus ke laporan peribadi anda.\n\n"
+    "Anda boleh semak semua rekod melalui *bot laporan khas* kami:\n"
+    "👉 @LaporanBelanjaBot\n\n"
+    "*Sila langgan bot laporan tersebut* untuk lihat senarai belanja harian, mingguan dan bulanan anda dengan mudah!\n\n"
     "Taip /cancel untuk berhenti bila-bila masa."
 )
 
@@ -66,12 +95,12 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not data:
         await update.message.reply_text(
-            "⚠️ Format tak lengkap atau tiada jumlah dengan 'RM'.\n\n"
+            "⚠️ Format tidak lengkap. Mesti ada *jumlah RM* dan *barang dibeli*.\n\n"
             "*Contoh yang betul:*\n"
             "▫️ `RM5.20 Nasi Lemak Warung Haji`\n"
-            "▫️ `RM12 Sabun Dobi Giant`\n"
-            "▫️ `RM3.50 Teh O Ais gerai depan rumah`\n\n"
-            "Sila cuba semula ikut format di atas.",
+            "▫️ `Nasi ayam RM6 warung Ali`\n"
+            "▫️ `Sabun RM3`\n\n"
+            "Sila cuba semula.",
             parse_mode="Markdown",
             reply_markup=main_menu
         )
@@ -85,7 +114,10 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_expense_to_sheet(data)
 
     await update.message.reply_text(
-        f"✅ Disimpan!\n🍽 {data['item']}\n📍 {data['location']}\n💸 RM{data['amount']}\n\n"
+        f"✅ Disimpan!\n"
+        f"🍽 {data['item']}\n"
+        f"📍 {data['location']}\n"
+        f"💸 RM{data['amount']}\n\n"
         "Nak rekod belanja lain?",
         reply_markup=main_menu
     )
