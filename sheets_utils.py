@@ -1,4 +1,3 @@
-
 import os
 import json
 import gspread
@@ -9,7 +8,7 @@ def get_sheet(sheet_name):
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
         raise Exception("GOOGLE_CREDENTIALS_JSON tidak dijumpai dalam Environment Variables.")
-
+    
     creds_dict = json.loads(creds_json)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
@@ -24,7 +23,7 @@ def save_expense_to_sheet(data):
             data.get("item", ""),
             data.get("location", ""),
             data.get("amount", ""),
-            "",  # gambar placeholder
+            "",  # placeholder gambar
             data.get("chat_id", "")
         ])
     except Exception as e:
