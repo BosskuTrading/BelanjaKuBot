@@ -12,6 +12,8 @@ from sheets_utils import save_expense_to_sheet
 
 load_dotenv()
 TOKEN = os.getenv("BOT1_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", "8443"))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -132,6 +134,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -139,9 +142,16 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+
     app.add_handler(conv)
     app.add_handler(CommandHandler("status", status))
-    app.run_polling()
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=f"/{TOKEN}",
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
