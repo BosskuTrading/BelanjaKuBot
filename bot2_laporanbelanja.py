@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from sheets_utils import get_user_expenses
 
 load_dotenv()
-TOKEN = os.getenv("BOT1_TOKEN")
+TOKEN = os.getenv("BOT2_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8443"))
 
@@ -86,8 +86,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         filtered = all_expenses
 
-    text = f"{title}\n\n{format_expenses(filtered)}"
-    await query.edit_message_text(text=text, parse_mode="Markdown")
+    result_text = format_expenses(filtered)
+    if not result_text.strip():
+        result_text = "❌ Tiada belanja direkodkan dalam tempoh ini."
+
+    await query.edit_message_text(text=f"{title}\n\n{result_text}", parse_mode="Markdown")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
