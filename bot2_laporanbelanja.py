@@ -3,7 +3,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 from sheets_utils import get_user_expenses
 
@@ -12,7 +12,7 @@ TOKEN = os.getenv("BOT2_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8443"))
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 def fmt_date(d):
     return d.strftime("%d %B %Y")
@@ -27,7 +27,8 @@ def format_expenses(expenses):
             row_date = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
             lines.append(f"🧾 {row[2]} | {row[3]} | RM{row[4]} | {fmt_date(row_date)}")
             total += float(row[4])
-        except:
+        except Exception as e:
+            logging.warning(f"Skipping row due to error: {e}")
             continue
     return "\n".join(lines) + f"\n\n💰 Jumlah: RM{total:.2f}"
 
@@ -38,7 +39,8 @@ def filter_by_range(expenses, start_date, end_date):
             row_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").date()
             if start_date <= row_date <= end_date:
                 result.append(row)
-        except:
+        except Exception as e:
+            logging.warning(f"Date parsing error: {e}")
             continue
     return result
 
@@ -61,6 +63,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     chat_id = query.message.chat.id
     pilihan = query.data
+    logging.info(f"Callback received: {pilihan} from chat_id {chat_id}")
 
     all_expenses = get_user_expenses(chat_id)
     today = datetime.today().date()
@@ -105,4 +108,5 @@ def main():
     )
 
 if __name__ == "__main__":
+    logging.info("Bot2 LaporanBelanja is starting...")
     main()
