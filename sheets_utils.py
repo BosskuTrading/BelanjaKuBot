@@ -1,48 +1,51 @@
+
 import os
-import json
 import gspread
+import base64
+import json
+from datetime import datetime
 from oauth2client.service_account import ServiceAccountCredentials
 
-def get_sheet(sheet_name):
+def get_credentials():
+    credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if not credentials_json:
+        decoded = base64.b64decode(os.getenv("GOOGLE_CREDENTIALS_BASE64")).decode("utf-8")
+        credentials_json = decoded
+    return json.loads(credentials_json)
+
+def connect_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if not creds_json:
-        raise Exception("GOOGLE_CREDENTIALS_JSON tidak dijumpai dalam Environment Variables.")
-    
-    creds_dict = json.loads(creds_json)
+    creds_dict = get_credentials()
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
-    return client.open("Laporan Belanja").worksheet(sheet_name)
+    sheet_id = os.getenv("SPREADSHEET_ID")
+    return client.open_by_key(sheet_id)
 
 def save_expense_to_sheet(data):
     try:
-        sheet = get_sheet("Laporan Belanja")
-        sheet.append_row([
+        sheet = connect_sheet()
+        worksheet = sheet.worksheet("Laporan Belanja")
+        row = [
             data.get("timestamp", ""),
             data.get("from", ""),
             data.get("item", ""),
             data.get("location", ""),
             data.get("amount", ""),
-            "",  # placeholder gambar
+            "",  # Untuk gambar jika ada di masa depan
             data.get("chat_id", "")
-        ])
+        ]
+        print("[DEBUG] Menulis baris ke Google Sheet:", row)
+        worksheet.append_row(row)
+        print("[DEBUG] Baris berjaya ditulis.")
     except Exception as e:
-        print(f"[Sheet Error - save_expense_to_sheet]: {e}")
-
-def get_all_users():
-    try:
-        sheet = get_sheet("Pengguna")
-        return sheet.get_all_records()
-    except Exception as e:
-        print(f"[Sheet Error - get_all_users]: {e}")
-        return []
+        print("[ERROR] Gagal simpan ke Google Sheets:", e)
 
 def get_user_expenses(chat_id):
     try:
-        sheet = get_sheet("Laporan Belanja")
-        rows = sheet.get_all_values()[1:]
-        user_expenses = [r for r in rows if r[-1] == str(chat_id)]
-        return user_expenses
+        sheet = connect_sheet()
+        worksheet = sheet.worksheet("Laporan Belanja")
+        data = worksheet.get_all_values()[1:]  # skip header
+        return [row for row in data if len(row) > 6 and str(row[6]) == str(chat_id)]
     except Exception as e:
-        print(f"[Sheet Error - get_user_expenses]: {e}")
+        print("[ERROR] Gagal baca data Google Sheets:", e)
         return []

@@ -1,8 +1,9 @@
+
 import os
 import logging
 import re
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters,
     ContextTypes, ConversationHandler
@@ -19,15 +20,10 @@ logging.basicConfig(level=logging.INFO)
 
 CHOOSING_MODE, TYPING_EXPENSE = range(2)
 
-main_menu = ReplyKeyboardMarkup(
-    [[KeyboardButton("Taip Maklumat Belanja")]],
-    resize_keyboard=True, one_time_keyboard=True
-)
-
 def parse_expense_text(text):
     try:
         text = text.strip()
-        match = re.search(r"(rm|RM)\s?(\d+(?:\.\d{1,2})?)", text)
+        match = re.search(r"(rm|RM)\s?(\d+(?:\.\d{1,2})?)", text, re.IGNORECASE)
         if not match:
             return None
 
@@ -45,18 +41,18 @@ def parse_expense_text(text):
             return None
 
         if len(before_words) >= len(after_words):
-            item = before
-            location = after
+            item = before.strip().title()
+            location = after.strip().title()
         else:
-            item = after
-            location = before
+            item = after.strip().title()
+            location = before.strip().title()
 
-        if not item or item.lower() in ["rm", ""]:
+        if not item or not amount:
             return None
 
         return {
-            "item": item.title(),
-            "location": location.title() if location else "-",
+            "item": item,
+            "location": location if location else "-",
             "amount": amount
         }
     except Exception as e:
@@ -74,16 +70,15 @@ WELCOME_MSG = (
     "▫️ `Sabun Dobi RM12`\n\n"
     "*Wajib ada jumlah RM dan barang dibeli.*\n"
     "Kedai/Tempat adalah pilihan.\n\n"
-    "📊 *Laporan Belanja Anda Akan Direkod:*\n"
-    "Setiap belanja yang anda rekod akan dihantar terus ke laporan peribadi anda.\n\n"
-    "Anda boleh semak semua rekod melalui *bot laporan khas* kami:\n"
-    "👉 @LaporanBelanjaBot\n\n"
-    "*Sila langgan bot laporan tersebut* untuk lihat senarai belanja harian, mingguan dan bulanan anda dengan mudah!\n\n"
+    "📝 *Bot ini hanya digunakan untuk merekod belanja anda.*\n"
+    "📊 Untuk melihat laporan harian, mingguan dan bulanan anda:\n"
+    "👉 Sila buka dan langgan bot khas laporan:\n"
+    "➡️ @LaporanBelanjaBot\n\n"
     "Taip /cancel untuk berhenti bila-bila masa."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME_MSG, reply_markup=main_menu, parse_mode="Markdown")
+    await update.message.reply_text(WELCOME_MSG, parse_mode="Markdown")
     return TYPING_EXPENSE
 
 async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,14 +92,9 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not data:
         await update.message.reply_text(
-            "⚠️ Format tidak lengkap. Mesti ada *jumlah RM* dan *barang dibeli*.\n\n"
-            "*Contoh yang betul:*\n"
-            "▫️ `RM5.20 Nasi Lemak Warung Haji`\n"
-            "▫️ `Nasi ayam RM6 warung Ali`\n"
-            "▫️ `Sabun RM3`\n\n"
-            "Sila cuba semula.",
-            parse_mode="Markdown",
-            reply_markup=main_menu
+            "⚠️ Format tidak lengkap. Mesti ada *jumlah RM* dan *barang dibeli* seperti:\n"
+            "`RM5 nasi lemak kedai Ali` atau `sabun RM2 kedai mamak`.",
+            parse_mode="Markdown"
         )
         return TYPING_EXPENSE
 
@@ -113,16 +103,18 @@ async def received_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "from": user.full_name,
         "chat_id": chat_id
     })
-    save_expense_to_sheet(data)
 
-    await update.message.reply_text(
-        f"✅ Disimpan!\n"
-        f"🍽 {data['item']}\n"
-        f"📍 {data['location']}\n"
-        f"💸 RM{data['amount']}\n\n"
-        "Nak rekod belanja lain?",
-        reply_markup=main_menu
-    )
+    try:
+        save_expense_to_sheet(data)
+        item = data.get("item", "-")
+        location = data.get("location", "-")
+        amount = data.get("amount", "-")
+        reply_msg = f"✅ Disimpan!\n🍽 {item}\n📍 {location}\n💸 RM{amount}\n\nNak rekod belanja lain?"
+        await update.message.reply_text(reply_msg)
+    except Exception as e:
+        await update.message.reply_text("❌ Gagal simpan ke Google Sheets. Sila cuba lagi nanti.")
+        print(f"[Save Error]: {e}")
+
     return TYPING_EXPENSE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
