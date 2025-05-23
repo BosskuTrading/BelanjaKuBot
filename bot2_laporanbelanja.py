@@ -59,6 +59,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    my_now = datetime.now(timezone("Asia/Kuala_Lumpur"))
+    waktu_semasa = my_now.strftime("%H:%M:%S")
+
     query = update.callback_query
     try:
         await query.answer()
@@ -69,7 +72,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.info(f"Callback received: {pilihan} from chat_id {chat_id}")
 
     all_expenses = get_user_expenses(chat_id)
-    today = datetime.today().date()
+    from pytz import timezone
+    today = datetime.now(timezone("Asia/Kuala_Lumpur")).date()
 
     if pilihan == "harian":
         start = end = today
@@ -92,11 +96,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         filtered = all_expenses
 
-    result_text = format_expenses(filtered)
+    
+    debug_msg = f"⏰ Masa Semasa oleh Bot (Asia/Kuala_Lumpur): {my_now.strftime('%Y-%m-%d %H:%M:%S')}\n" \
+                 "🕒 Masa Rasmi (MST - SIRIM): Sama seperti bot (UTC+8)\n\n"
+
+    result_text = debug_msg + format_expenses(filtered)
     if not result_text.strip():
         result_text = "❌ Tiada belanja direkodkan dalam tempoh ini."
 
-    await query.edit_message_text(text=f"{title}\n\n{result_text}", parse_mode="Markdown")
+    await query.edit_message_text(text=f"\n⏰ Waktu Semasa (MYT): {waktu_semasa}\n\n{title}\n\n{result_text}", parse_mode="Markdown")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
