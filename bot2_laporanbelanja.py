@@ -60,7 +60,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        logging.warning(f"answer_callback_query failed: {e}")
     chat_id = query.message.chat.id
     pilihan = query.data
     logging.info(f"Callback received: {pilihan} from chat_id {chat_id}")
