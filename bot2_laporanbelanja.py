@@ -1,123 +1,59 @@
+# bot2_laporanbelanja.py
 
 import os
+import json
+import base64
 import logging
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from dotenv import load_dotenv
-from sheets_utils import get_user_expenses
+from telegram import Bot
+import gspread
 
-load_dotenv()
-TOKEN = os.getenv("BOT2_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", "8443"))
+# Logging
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Token & Sheet
+BOT_TOKEN = os.getenv("TOKEN_BOT2")
+SHEET_ID = os.getenv("SHEET_ID")
 
-def fmt_date(d):
-    return d.strftime("%d %B %Y")
+# Setup bot
+bot = Bot(BOT_TOKEN)
 
-def format_expenses(expenses):
-    if not expenses:
-        return "❌ Tiada belanja direkodkan dalam tempoh ini."
-    lines = []
-    total = 0
-    for row in expenses:
-        try:
-            row_date = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
-            lines.append(f"🧾 {row[2]} | {row[3]} | RM{row[4]} | {fmt_date(row_date)}")
-            total += float(row[4])
-        except Exception as e:
-            logging.warning(f"Skipping row due to error: {e}")
-            continue
-    return "\n".join(lines) + f"\n\n💰 Jumlah: RM{total:.2f}"
+# Google Sheets auth
+creds_json = base64.b64decode(os.environ["GOOGLE_CREDENTIALS_BASE64"]).decode("utf-8")
+creds_dict = json.loads(creds_json)
+gc = gspread.service_account_from_dict(creds_dict)
+sheet = gc.open_by_key(SHEET_ID).sheet1
 
-def filter_by_range(expenses, start_date, end_date):
-    result = []
-    for row in expenses:
-        try:
-            row_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").date()
-            if start_date <= row_date <= end_date:
-                result.append(row)
-        except Exception as e:
-            logging.warning(f"Date parsing error: {e}")
-            continue
-    return result
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📅 Harian", callback_data="harian")],
-        [InlineKeyboardButton("🗓 Mingguan", callback_data="mingguan")],
-        [InlineKeyboardButton("📆 Bulanan", callback_data="bulanan")],
-        [InlineKeyboardButton("📋 Semua", callback_data="semua")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "👋 Hai! Saya *LaporanBelanjaBot*. Pilih laporan yang anda mahu lihat:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+def get_all_data():
+    rows = sheet.get_all_values()[1:]  # skip header
+    headers = sheet.row_values(1)
+    return [dict(zip(headers, row)) for row in rows]
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    my_now = datetime.now(timezone("Asia/Kuala_Lumpur"))
-    waktu_semasa = my_now.strftime("%H:%M:%S")
 
-    query = update.callback_query
+def filter_by_date(data, start_date, end_date):
+    return [row for row in data if start_date <= row.get("date", "") <= end_date]
+
+
+def group_by_user(data):
+    grouped = {}
+    for row in data:
+        chat_id = row.get("user_id")
+        if chat_id not in grouped:
+            grouped[chat_id] = []
+        grouped[chat_id].append(row)
+    return grouped
+
+
+def summarize_expenses(rows):
     try:
-        await query.answer()
-    except Exception as e:
-        logging.warning(f"answer_callback_query failed: {e}")
-    chat_id = query.message.chat.id
-    pilihan = query.data
-    logging.info(f"Callback received: {pilihan} from chat_id {chat_id}")
+        total = sum(float(row.get("amount", 0)) for row in rows)
+        count = len(rows)
+    except:
+        total, count = 0, 0
+    return total, count
 
-    all_expenses = get_user_expenses(chat_id)
-    from pytz import timezone
-    today = datetime.now(timezone("Asia/Kuala_Lumpur")).date()
 
-    if pilihan == "harian":
-        start = end = today
-        title = f"📅 Laporan Harian ({fmt_date(start)})"
-    elif pilihan == "mingguan":
-        start = today - timedelta(days=today.weekday())
-        end = start + timedelta(days=6)
-        title = f"🗓 Laporan Mingguan ({fmt_date(start)} – {fmt_date(end)})"
-    elif pilihan == "bulanan":
-        start = today.replace(day=1)
-        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-        end = next_month - timedelta(days=1)
-        title = f"📆 Laporan Bulanan ({fmt_date(start)} – {fmt_date(end)})"
-    else:
-        start = end = None
-        title = "📋 Semua Laporan Belanja Anda"
-
-    if start and end:
-        filtered = filter_by_range(all_expenses, start, end)
-    else:
-        filtered = all_expenses
-
-    
-    debug_msg = f"⏰ Masa Semasa oleh Bot (Asia/Kuala_Lumpur): {my_now.strftime('%Y-%m-%d %H:%M:%S')}\n" \
-                 "🕒 Masa Rasmi (MST - SIRIM): Sama seperti bot (UTC+8)\n\n"
-
-    result_text = debug_msg + format_expenses(filtered)
-    if not result_text.strip():
-        result_text = "❌ Tiada belanja direkodkan dalam tempoh ini."
-
-    await query.edit_message_text(text=f"\n⏰ Waktu Semasa (MYT): {waktu_semasa}\n\n{title}\n\n{result_text}", parse_mode="Markdown")
-
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=f"/{TOKEN}",
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-    )
-
-if __name__ == "__main__":
-    logging.info("Bot2 LaporanBelanja is starting...")
-    main()
+def send_report_to_user(chat_id, title, rows):
+    total, count = summarize_expenses(rows)
+    if count =

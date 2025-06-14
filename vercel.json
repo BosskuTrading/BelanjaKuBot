@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "bot1_laporbelanja.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/bot1", "dest": "bot1_laporbelanja.py" },
+    { "src": "/", "dest": "bot1_laporbelanja.py" }
+  ]
+}

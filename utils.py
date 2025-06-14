@@ -1,43 +1,25 @@
-import pytesseract
-from PIL import Image
-import io
-import os
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+# utils.py
+
+import re
 from datetime import datetime
 
-SHEET_ID = os.getenv("SHEET_ID")
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SERVICE_ACCOUNT_FILE = 'credentials.json'
+def extract_expense_details(text: str):
+    """
+    Contoh input:
+    "nasi lemak rm5.00" → {item: nasi lemak, amount: 5.00}
+    """
+    pattern = r"(.*?)(?:rm|RM|RM\s*)(\d+(?:\.\d{1,2})?)"
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    
+    item = match.group(1).strip().capitalize()
+    amount = float(match.group(2))
 
-def extract_text(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes))
-    text = pytesseract.image_to_string(image)
-    return text
-
-def append_to_sheet(data):
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    service = build('sheets', 'v4', credentials=creds)
-    sheet = service.spreadsheets()
-    range_ = 'Belanja!A:G'  # Sheet name
-    body = {'values': [data]}
-    result = sheet.values().append(
-        spreadsheetId=SHEET_ID,
-        range=range_,
-        valueInputOption="USER_ENTERED",
-        body=body
-    ).execute()
-
-def parse_receipt(text):
     now = datetime.now()
-    # Logik asas, boleh ditambah baik
-    return [
-        now.strftime('%Y-%m-%d'),  # Tarikh upload
-        "Unknown Shop",            # Nama kedai
-        "Unknown Time",            # Waktu
-        "Unknown Location",        # Lokasi
-        "Item A, Item B",          # Item
-        "2",                       # Jumlah item
-        "20.00"                    # Jumlah RM
-    ]
+    return {
+        "item": item,
+        "amount": amount,
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+    }
