@@ -1,78 +1,61 @@
 import os
-from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Request, Response, jsonify, request
 from telegram import Bot
-import gspread
-from sheets_utils import get_gspread_client
+import datetime
 
-app = Flask(__name__)
-TOKEN = os.getenv("TOKEN_BOT2")
+from sheets_utils import get_user_expenses_summary
+
+TOKEN_BOT2 = os.getenv("TOKEN_BOT2")
 SHEET_ID = os.getenv("SHEET_ID")
-bot = Bot(token=TOKEN)
 
-# Format mesej laporan
-def format_report(rows, title="Laporan"):
-    total = 0
-    count = 0
-    for row in rows:
-        try:
-            jumlah = float(row[6])
-            total += jumlah
-            count += 1
-        except:
-            continue
-    return (
-        f"📊 *{title}*\n"
-        f"Transaksi: {count}\n"
-        f"Jumlah belanja: RM{total:.2f}\n\n"
-        "_Bot ini dibawakan oleh Fadirul Ezwan._"
-    )
+bot = Bot(token=TOKEN_BOT2)
 
-# Penapis ikut jenis laporan
-def filter_by_date(rows, jenis):
-    now = datetime.now()
-    if jenis == "daily":
-        target = now.date()
-        return [r for r in rows if parse_date(r[0]) == target]
-    elif jenis == "weekly":
-        week_ago = now - timedelta(days=7)
-        return [r for r in rows if parse_date(r[0]) >= week_ago.date()]
-    elif jenis == "monthly":
-        month_ago = now - timedelta(days=30)
-        return [r for r in rows if parse_date(r[0]) >= month_ago.date()]
-    return []
+def send_daily_reports():
+    users = get_user_expenses_summary(SHEET_ID)
+    for user_id, summary in users.items():
+        msg = (
+            f"📊 *Laporan Harian Belanja*\n\n"
+            f"Tarikh: {datetime.datetime.now().strftime('%d/%m/%Y')}\n"
+            f"Jumlah Belanja Hari Ini: RM{summary.get('daily', 0):.2f}\n\n"
+            "_Bot ini dibawakan oleh Fadirul Ezwan_"
+        )
+        bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
 
-def parse_date(value):
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except:
-        return None
+def send_weekly_reports():
+    users = get_user_expenses_summary(SHEET_ID)
+    for user_id, summary in users.items():
+        msg = (
+            f"📈 *Laporan Mingguan Belanja*\n\n"
+            f"Minggu: {datetime.datetime.now().isocalendar()[1]}\n"
+            f"Jumlah Belanja Minggu Ini: RM{summary.get('weekly', 0):.2f}\n\n"
+            "_Bot ini dibawakan oleh Fadirul Ezwan_"
+        )
+        bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
 
-@app.route("/bot2", methods=["GET"])
-def send_reports():
-    jenis = request.args.get("type", "daily")  # default harian
-    title_map = {"daily": "Laporan Harian", "weekly": "Laporan Mingguan", "monthly": "Laporan Bulanan"}
-    title = title_map.get(jenis, "Laporan")
+def send_monthly_reports():
+    users = get_user_expenses_summary(SHEET_ID)
+    for user_id, summary in users.items():
+        msg = (
+            f"📅 *Laporan Bulanan Belanja*\n\n"
+            f"Bulan: {datetime.datetime.now().strftime('%B %Y')}\n"
+            f"Jumlah Belanja Bulan Ini: RM{summary.get('monthly', 0):.2f}\n\n"
+            "_Bot ini dibawakan oleh Fadirul Ezwan_"
+        )
+        bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
 
-    try:
-        gc = get_gspread_client()
-        sheet = gc.open_by_key(SHEET_ID)
-        worksheets = sheet.worksheets()
+# ================================
+# Main Vercel Handler
+# ================================
 
-        for ws in worksheets:
-            chat_id = ws.title
-            rows = ws.get_all_values()[1:]  # skip header
-            filtered = filter_by_date(rows, jenis)
+def handler(req: Request) -> Response:
+    report_type = req.args.get("type", "daily")
+    today = datetime.datetime.now()
 
-            if not filtered:
-                continue
+    if report_type == "daily":
+        send_daily_reports()
+    elif report_type == "weekly_or_monthly":
+        send_weekly_reports()
+        if today.day == 1:
+            send_monthly_reports()
 
-            msg = format_report(filtered, title)
-            try:
-                bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Gagal hantar ke {chat_id}: {e}")
-    except Exception as e:
-        return f"❌ Gagal: {str(e)}", 500
-
-    return "✅ Laporan dihantar", 200
+    return jsonify({"status": "ok", "report_type": report_type})
