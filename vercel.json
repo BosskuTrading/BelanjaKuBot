@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/index.js"
+    }
+  ],
+  "functions": {
+    "index.js": {
+      "maxDuration": 30
+    }
+  },
+  "env": {
+    "TZ": "Asia/Kuala_Lumpur"
+  },
+  "crons": [
+    {
+      "path": "/api/cron/daily",
+      "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/cron/weekly", 
+      "schedule": "0 20 * * 0"
+    },
+    {
+      "path": "/api/cron/monthly",
+      "schedule": "0 20 1 * *"
+    }
+  ]
+}
