@@ -9,16 +9,12 @@
   ],
   "crons": [
     {
-      "path": "/bot2",
+      "path": "/bot2?type=daily",
       "schedule": "0 0 * * *"
     },
     {
-      "path": "/bot2?type=weekly",
+      "path": "/bot2?type=weekly_or_monthly",
       "schedule": "0 0 * * 1"
-    },
-    {
-      "path": "/bot2?type=monthly",
-      "schedule": "0 0 1 * *"
     }
   ]
 }
