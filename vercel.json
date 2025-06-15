@@ -1,24 +1,24 @@
 {
-  version 2,
-  builds [
-    { src api.py, use @vercelpython }
+  "version": 2,
+  "builds": [
+    { "src": "api/*.py", "use": "@vercel/python" }
   ],
-  routes [
-    { src bot1, dest apibot1.py },
-    { src bot2, dest apibot2.py }
+  "routes": [
+    { "src": "/bot1", "dest": "api/bot1.py" },
+    { "src": "/bot2", "dest": "api/bot2.py" }
   ],
-  crons [
+  "crons": [
     {
-      path bot2,
-      schedule 0 0           Harian jam 8 pagi MYT
+      "path": "/bot2",
+      "schedule": "0 0 * * *"
     },
     {
-      path bot2type=weekly,
-      schedule 0 0   1        Mingguan - setiap Isnin
+      "path": "/bot2?type=weekly",
+      "schedule": "0 0 * * 1"
     },
     {
-      path bot2type=monthly,
-      schedule 0 0 1          Bulanan - setiap 1hb
+      "path": "/bot2?type=monthly",
+      "schedule": "0 0 1 * *"
     }
   ]
 }
